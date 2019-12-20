@@ -16,19 +16,10 @@ limitations under the License.
 
 package v1alpha1
 
-// crd contains functions that construct boilerplate CRD definitions.
-
 import (
-	"testing"
-
 	"github.com/davecgh/go-spew/spew"
+	pkgTest "knative.dev/pkg/test"
 	"knative.dev/serving/pkg/apis/serving/v1alpha1"
-)
-
-const (
-	// Default for user containers in e2e tests. This value is lower than the general
-	// Knative's default so as to run more effectively in CI with limited resources.
-	defaultRequestCPU = "100m"
 )
 
 // ResourceObjects holds types of the resource objects.
@@ -40,6 +31,6 @@ type ResourceObjects struct {
 }
 
 // LogResourceObject logs the resource object with the resource name and value
-func LogResourceObject(t *testing.T, value ResourceObjects) {
-	t.Logf("resource %s", spew.Sprint(value))
+func LogResourceObject(t pkgTest.T, value ResourceObjects) {
+	t.Log("", "resource", spew.Sprint(value))
 }

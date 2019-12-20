@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	certmanagerv1alpha1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1alpha1"
+	istiov1alpha3 "istio.io/client-go/pkg/apis/networking/v1alpha3"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2beta1 "k8s.io/api/autoscaling/v2beta1"
 	corev1 "k8s.io/api/core/v1"
@@ -30,15 +31,14 @@ import (
 	cachingv1alpha1 "knative.dev/caching/pkg/apis/caching/v1alpha1"
 	fakecachingclientset "knative.dev/caching/pkg/client/clientset/versioned/fake"
 	cachinglisters "knative.dev/caching/pkg/client/listers/caching/v1alpha1"
-	istiov1alpha3 "knative.dev/pkg/apis/istio/v1alpha3"
-	fakesharedclientset "knative.dev/pkg/client/clientset/versioned/fake"
-	istiolisters "knative.dev/pkg/client/listers/istio/v1alpha3"
 	"knative.dev/pkg/reconciler/testing"
 	av1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	networking "knative.dev/serving/pkg/apis/networking/v1alpha1"
 	"knative.dev/serving/pkg/apis/serving/v1alpha1"
 	certmanagerlisters "knative.dev/serving/pkg/client/certmanager/listers/certmanager/v1alpha1"
 	fakeservingclientset "knative.dev/serving/pkg/client/clientset/versioned/fake"
+	fakeistioclientset "knative.dev/serving/pkg/client/istio/clientset/versioned/fake"
+	istiolisters "knative.dev/serving/pkg/client/istio/listers/networking/v1alpha3"
 	palisters "knative.dev/serving/pkg/client/listers/autoscaling/v1alpha1"
 	networkinglisters "knative.dev/serving/pkg/client/listers/networking/v1alpha1"
 	servinglisters "knative.dev/serving/pkg/client/listers/serving/v1alpha1"
@@ -46,7 +46,7 @@ import (
 
 var clientSetSchemes = []func(*runtime.Scheme) error{
 	fakekubeclientset.AddToScheme,
-	fakesharedclientset.AddToScheme,
+	fakeistioclientset.AddToScheme,
 	fakeservingclientset.AddToScheme,
 	fakecachingclientset.AddToScheme,
 	certmanagerv1alpha1.AddToScheme,
@@ -99,8 +99,8 @@ func (l *Listers) GetServingObjects() []runtime.Object {
 	return l.sorter.ObjectsForSchemeFunc(fakeservingclientset.AddToScheme)
 }
 
-func (l *Listers) GetSharedObjects() []runtime.Object {
-	return l.sorter.ObjectsForSchemeFunc(fakesharedclientset.AddToScheme)
+func (l *Listers) GetIstioObjects() []runtime.Object {
+	return l.sorter.ObjectsForSchemeFunc(fakeistioclientset.AddToScheme)
 }
 
 // GetCMCertificateObjects gets a list of Cert-Manager Certificate objects.
@@ -143,11 +143,6 @@ func (l *Listers) GetHorizontalPodAutoscalerLister() autoscalingv2beta1listers.H
 	return autoscalingv2beta1listers.NewHorizontalPodAutoscalerLister(l.IndexerFor(&autoscalingv2beta1.HorizontalPodAutoscaler{}))
 }
 
-// GetClusterIngressLister get lister for ClusterIngress resource.
-func (l *Listers) GetClusterIngressLister() networkinglisters.ClusterIngressLister {
-	return networkinglisters.NewClusterIngressLister(l.IndexerFor(&networking.ClusterIngress{}))
-}
-
 // GetIngressLister get lister for Ingress resource.
 func (l *Listers) GetIngressLister() networkinglisters.IngressLister {
 	return networkinglisters.NewIngressLister(l.IndexerFor(&networking.Ingress{}))
@@ -177,6 +172,11 @@ func (l *Listers) GetCMCertificateLister() certmanagerlisters.CertificateLister 
 	return certmanagerlisters.NewCertificateLister(l.IndexerFor(&certmanagerv1alpha1.Certificate{}))
 }
 
+// GetCMChallengeLister gets lister for Cert Manager Challenge resource.
+func (l *Listers) GetCMChallengeLister() certmanagerlisters.ChallengeLister {
+	return certmanagerlisters.NewChallengeLister(l.IndexerFor(&certmanagerv1alpha1.Challenge{}))
+}
+
 func (l *Listers) GetImageLister() cachinglisters.ImageLister {
 	return cachinglisters.NewImageLister(l.IndexerFor(&cachingv1alpha1.Image{}))
 }
@@ -199,4 +199,9 @@ func (l *Listers) GetSecretLister() corev1listers.SecretLister {
 
 func (l *Listers) GetConfigMapLister() corev1listers.ConfigMapLister {
 	return corev1listers.NewConfigMapLister(l.IndexerFor(&corev1.ConfigMap{}))
+}
+
+// GetNamespaceLister gets lister for Namespace resource.
+func (l *Listers) GetNamespaceLister() corev1listers.NamespaceLister {
+	return corev1listers.NewNamespaceLister(l.IndexerFor(&corev1.Namespace{}))
 }

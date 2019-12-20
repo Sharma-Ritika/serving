@@ -18,41 +18,38 @@ package config
 
 import (
 	"context"
-	"math/rand"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	pkglogging "knative.dev/pkg/logging"
+	"knative.dev/pkg/logging"
 	logtesting "knative.dev/pkg/logging/testing"
 	pkgmetrics "knative.dev/pkg/metrics"
-	"knative.dev/serving/pkg/autoscaler"
+	pkgtracing "knative.dev/pkg/tracing/config"
+	apisconfig "knative.dev/serving/pkg/apis/config"
 	deployment "knative.dev/serving/pkg/deployment"
-	"knative.dev/serving/pkg/logging"
 	"knative.dev/serving/pkg/metrics"
 	"knative.dev/serving/pkg/network"
-	pkgtracing "knative.dev/serving/pkg/tracing/config"
 
 	. "knative.dev/pkg/configmap/testing"
 )
 
 func TestStoreLoadWithContext(t *testing.T) {
-	defer logtesting.ClearAll()
 	store := NewStore(logtesting.TestLogger(t))
 
 	deploymentConfig := ConfigMapFromTestFile(t, deployment.ConfigName, deployment.QueueSidecarImageKey)
 	networkConfig := ConfigMapFromTestFile(t, network.ConfigName)
 	observabilityConfig := ConfigMapFromTestFile(t, pkgmetrics.ConfigMapName())
-	loggingConfig := ConfigMapFromTestFile(t, pkglogging.ConfigMapName())
+	loggingConfig := ConfigMapFromTestFile(t, logging.ConfigMapName())
 	tracingConfig := ConfigMapFromTestFile(t, pkgtracing.ConfigName)
-	autoscalerConfig := ConfigMapFromTestFile(t, autoscaler.ConfigName)
+	defaultConfig := ConfigMapFromTestFile(t, apisconfig.DefaultsConfigName)
 
 	store.OnConfigChanged(deploymentConfig)
 	store.OnConfigChanged(networkConfig)
 	store.OnConfigChanged(observabilityConfig)
 	store.OnConfigChanged(loggingConfig)
 	store.OnConfigChanged(tracingConfig)
-	store.OnConfigChanged(autoscalerConfig)
+	store.OnConfigChanged(defaultConfig)
 
 	config := FromContext(store.ToContext(context.Background()))
 
@@ -93,31 +90,31 @@ func TestStoreLoadWithContext(t *testing.T) {
 		}
 	})
 
-	t.Run("autoscaler", func(t *testing.T) {
-		expected, _ := autoscaler.NewConfigFromConfigMap(autoscalerConfig)
-		if diff := cmp.Diff(expected, config.Autoscaler); diff != "" {
-			t.Errorf("Unexpected autoscaler config (-want, +got): %v", diff)
+	t.Run("defaults", func(t *testing.T) {
+		expected, _ := apisconfig.NewDefaultsConfigFromConfigMap(defaultConfig)
+		if diff := cmp.Diff(expected, config.Defaults); diff != "" {
+			t.Errorf("Unexpected defaults config (-want, +got): %v", diff)
 		}
 	})
 }
 
 func TestStoreImmutableConfig(t *testing.T) {
-	defer logtesting.ClearAll()
 	store := NewStore(logtesting.TestLogger(t))
 
 	store.OnConfigChanged(ConfigMapFromTestFile(t, deployment.ConfigName, deployment.QueueSidecarImageKey))
 	store.OnConfigChanged(ConfigMapFromTestFile(t, network.ConfigName))
 	store.OnConfigChanged(ConfigMapFromTestFile(t, pkgmetrics.ConfigMapName()))
-	store.OnConfigChanged(ConfigMapFromTestFile(t, pkglogging.ConfigMapName()))
+	store.OnConfigChanged(ConfigMapFromTestFile(t, logging.ConfigMapName()))
 	store.OnConfigChanged(ConfigMapFromTestFile(t, pkgtracing.ConfigName))
-	store.OnConfigChanged(ConfigMapFromTestFile(t, autoscaler.ConfigName))
+	store.OnConfigChanged(ConfigMapFromTestFile(t, apisconfig.DefaultsConfigName))
 
 	config := store.Load()
 
 	config.Deployment.QueueSidecarImage = "mutated"
 	config.Network.IstioOutboundIPRanges = "mutated"
 	config.Logging.LoggingConfig = "mutated"
-	config.Autoscaler.MaxScaleUpRate = rand.Float64()
+	ccMutated := int64(4)
+	config.Defaults.ContainerConcurrency = ccMutated
 
 	newConfig := store.Load()
 
@@ -130,7 +127,7 @@ func TestStoreImmutableConfig(t *testing.T) {
 	if newConfig.Logging.LoggingConfig == "mutated" {
 		t.Error("Logging config is not immutable")
 	}
-	if newConfig.Autoscaler.MaxScaleUpRate == config.Autoscaler.MaxScaleUpRate {
-		t.Error("Autoscaler config is not immutable")
+	if newConfig.Defaults.ContainerConcurrency == ccMutated {
+		t.Error("Defaults config is not immutable")
 	}
 }

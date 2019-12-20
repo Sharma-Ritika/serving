@@ -17,14 +17,15 @@ package testing
 
 import (
 	"fmt"
-	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	"knative.dev/pkg/apis"
 	duckv1b1 "knative.dev/pkg/apis/duck/v1beta1"
+	"knative.dev/pkg/test"
 )
 
 // CheckCondition checks if condition `c` on `cc` has value `cs`.
+// DEPRECATED: Use versioned test helper
 func CheckCondition(s *duckv1b1.Status, c apis.ConditionType, cs corev1.ConditionStatus) error {
 	cond := s.GetCondition(c)
 	if cond == nil {
@@ -37,7 +38,8 @@ func CheckCondition(s *duckv1b1.Status, c apis.ConditionType, cs corev1.Conditio
 }
 
 // CheckConditionOngoing checks if the condition is in state `Unknown`.
-func CheckConditionOngoing(s *duckv1b1.Status, c apis.ConditionType, t *testing.T) {
+// DEPRECATED: Use versioned test helper
+func CheckConditionOngoing(s *duckv1b1.Status, c apis.ConditionType, t test.T) {
 	t.Helper()
 	if err := CheckCondition(s, c, corev1.ConditionUnknown); err != nil {
 		t.Error(err)
@@ -45,7 +47,8 @@ func CheckConditionOngoing(s *duckv1b1.Status, c apis.ConditionType, t *testing.
 }
 
 // CheckConditionFailed checks if the condition is in state `False`.
-func CheckConditionFailed(s *duckv1b1.Status, c apis.ConditionType, t *testing.T) {
+// DEPRECATED: Use versioned test helper
+func CheckConditionFailed(s *duckv1b1.Status, c apis.ConditionType, t test.T) {
 	t.Helper()
 	if err := CheckCondition(s, c, corev1.ConditionFalse); err != nil {
 		t.Error(err)
@@ -53,7 +56,8 @@ func CheckConditionFailed(s *duckv1b1.Status, c apis.ConditionType, t *testing.T
 }
 
 // CheckConditionSucceeded checks if the condition is in state `True`.
-func CheckConditionSucceeded(s *duckv1b1.Status, c apis.ConditionType, t *testing.T) {
+// DEPRECATED: Use versioned test helper
+func CheckConditionSucceeded(s *duckv1b1.Status, c apis.ConditionType, t test.T) {
 	t.Helper()
 	if err := CheckCondition(s, c, corev1.ConditionTrue); err != nil {
 		t.Error(err)

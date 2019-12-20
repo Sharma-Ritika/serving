@@ -21,9 +21,6 @@ package test
 
 import (
 	"flag"
-
-	"knative.dev/pkg/test"
-	"knative.dev/pkg/test/logging"
 )
 
 const (
@@ -33,9 +30,6 @@ const (
 	// AlternativeServingNamespace is a different namepace to run cross-
 	// namespace tests in.
 	AlternativeServingNamespace = "serving-tests-alt"
-
-	// E2EMetricExporter is the name for the metrics exporter logger
-	E2EMetricExporter = "e2e-metrics"
 
 	// Environment propagation conformance test objects
 
@@ -55,21 +49,17 @@ var ServingFlags = initializeServingFlags()
 // ServingEnvironmentFlags holds the e2e flags needed only by the serving repo.
 type ServingEnvironmentFlags struct {
 	ResolvableDomain bool // Resolve Route controller's `domainSuffix`
+	Https            bool // Indicates where the test service will be created with https
 }
 
 func initializeServingFlags() *ServingEnvironmentFlags {
 	var f ServingEnvironmentFlags
 
+	// Only define and set flags here. Flag values cannot be read at package init time.
 	flag.BoolVar(&f.ResolvableDomain, "resolvabledomain", false,
 		"Set this flag to true if you have configured the `domainSuffix` on your Route controller to a domain that will resolve to your test cluster.")
-
-	flag.Parse()
-	flag.Set("alsologtostderr", "true")
-	logging.InitializeLogger(test.Flags.LogVerbose)
-
-	if test.Flags.EmitMetrics {
-		logging.InitializeMetricExporter(E2EMetricExporter)
-	}
+	flag.BoolVar(&f.Https, "https", false,
+		"Set this flag to true to run all tests with https.")
 
 	return &f
 }

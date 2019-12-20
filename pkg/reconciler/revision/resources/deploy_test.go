@@ -17,6 +17,7 @@ limitations under the License.
 package resources
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -32,15 +33,14 @@ import (
 	"knative.dev/pkg/ptr"
 	"knative.dev/pkg/system"
 	_ "knative.dev/pkg/system/testing"
+	tracingconfig "knative.dev/pkg/tracing/config"
 	"knative.dev/serving/pkg/apis/networking"
 	"knative.dev/serving/pkg/apis/serving"
+	v1 "knative.dev/serving/pkg/apis/serving/v1"
 	"knative.dev/serving/pkg/apis/serving/v1alpha1"
-	"knative.dev/serving/pkg/apis/serving/v1beta1"
-	"knative.dev/serving/pkg/autoscaler"
 	"knative.dev/serving/pkg/deployment"
 	"knative.dev/serving/pkg/metrics"
 	"knative.dev/serving/pkg/network"
-	tracingconfig "knative.dev/serving/pkg/tracing/config"
 )
 
 var (
@@ -127,10 +127,13 @@ var (
 			Name:  "SERVING_REQUEST_METRICS_BACKEND",
 			Value: "",
 		}, {
-			Name:  "TRACING_CONFIG_ENABLE",
-			Value: "false",
+			Name:  "TRACING_CONFIG_BACKEND",
+			Value: "",
 		}, {
 			Name:  "TRACING_CONFIG_ZIPKIN_ENDPOINT",
+			Value: "",
+		}, {
+			Name:  "TRACING_CONFIG_STACKDRIVER_PROJECT_ID",
 			Value: "",
 		}, {
 			Name:  "TRACING_CONFIG_DEBUG",
@@ -159,6 +162,15 @@ var (
 		}, {
 			Name:  "INTERNAL_VOLUME_PATH",
 			Value: internalVolumePath,
+		}, {
+			Name:  "SERVING_READINESS_PROBE",
+			Value: fmt.Sprintf(`{"tcpSocket":{"port":%d,"host":"127.0.0.1"}}`, v1alpha1.DefaultUserPort),
+		}, {
+			Name:  "ENABLE_PROFILING",
+			Value: "false",
+		}, {
+			Name:  "SERVING_ENABLE_PROBE_REQUEST_LOG",
+			Value: "false",
 		}},
 	}
 
@@ -201,9 +213,7 @@ var (
 						serving.RevisionUID:      "1234",
 						AppLabelKey:              "bar",
 					},
-					Annotations: map[string]string{
-						sidecarIstioInjectAnnotation: "true",
-					},
+					Annotations: map[string]string{},
 				},
 				// Spec: filled in by makePodSpec
 			},
@@ -218,6 +228,7 @@ var (
 			Labels: map[string]string{
 				serving.ConfigurationLabelKey: "cfg",
 				serving.ServiceLabelKey:       "svc",
+				serving.RouteLabelKey:         "im-a-route",
 			},
 		},
 		Spec: v1alpha1.RevisionSpec{
@@ -225,7 +236,7 @@ var (
 				Name:  containerName,
 				Image: "busybox",
 			},
-			RevisionSpec: v1beta1.RevisionSpec{
+			RevisionSpec: v1.RevisionSpec{
 				TimeoutSeconds: ptr.Int64(45),
 			},
 		},
@@ -282,6 +293,15 @@ func withReadinessProbe(handler corev1.Handler) containerOption {
 	return func(container *corev1.Container) {
 		container.ReadinessProbe = &corev1.Probe{Handler: handler}
 	}
+}
+
+func withTCPReadinessProbe() containerOption {
+	return withReadinessProbe(corev1.Handler{
+		TCPSocket: &corev1.TCPSocketAction{
+			Host: "127.0.0.1",
+			Port: intstr.FromInt(v1alpha1.DefaultUserPort),
+		},
+	})
 }
 
 func withHTTPReadinessProbe(port int) containerOption {
@@ -346,9 +366,9 @@ func revision(opts ...revisionOption) *v1alpha1.Revision {
 	return revision
 }
 
-func withContainerConcurrency(cc v1beta1.RevisionContainerConcurrencyType) revisionOption {
+func withContainerConcurrency(cc int64) revisionOption {
 	return func(revision *v1alpha1.Revision) {
-		revision.Spec.ContainerConcurrency = cc
+		revision.Spec.ContainerConcurrency = &cc
 	}
 }
 
@@ -375,7 +395,6 @@ func TestMakePodSpec(t *testing.T) {
 		lc   *logging.Config
 		tc   *tracingconfig.Config
 		oc   *metrics.ObservabilityConfig
-		ac   *autoscaler.Config
 		cc   *deployment.Config
 		want *corev1.PodSpec
 	}{{
@@ -386,12 +405,14 @@ func TestMakePodSpec(t *testing.T) {
 				revision.Spec.GetContainer().Ports = []corev1.ContainerPort{{
 					ContainerPort: 8888,
 				}}
+				container(revision.Spec.GetContainer(),
+					withTCPReadinessProbe(),
+				)
 			},
 		),
 		lc: &logging.Config{},
 		tc: &tracingconfig.Config{},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: podSpec(
 			[]corev1.Container{
@@ -404,7 +425,7 @@ func TestMakePodSpec(t *testing.T) {
 				queueContainer(
 					withEnvVar("CONTAINER_CONCURRENCY", "1"),
 					withEnvVar("USER_PORT", "8888"),
-					withEnvVar("SERVING_READINESS_PROBE", ""),
+					withEnvVar("SERVING_READINESS_PROBE", `{"tcpSocket":{"port":8888,"host":"127.0.0.1"}}`),
 				),
 			}),
 	}, {
@@ -419,6 +440,9 @@ func TestMakePodSpec(t *testing.T) {
 					Name:      "asdf",
 					MountPath: "/asdf",
 				}}
+				container(revision.Spec.GetContainer(),
+					withTCPReadinessProbe(),
+				)
 				revision.Spec.Volumes = []corev1.Volume{{
 					Name: "asdf",
 					VolumeSource: corev1.VolumeSource{
@@ -432,7 +456,6 @@ func TestMakePodSpec(t *testing.T) {
 		lc: &logging.Config{},
 		tc: &tracingconfig.Config{},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: podSpec(
 			[]corev1.Container{
@@ -449,7 +472,7 @@ func TestMakePodSpec(t *testing.T) {
 				queueContainer(
 					withEnvVar("CONTAINER_CONCURRENCY", "1"),
 					withEnvVar("USER_PORT", "8888"),
-					withEnvVar("SERVING_READINESS_PROBE", ""),
+					withEnvVar("SERVING_READINESS_PROBE", `{"tcpSocket":{"port":8888,"host":"127.0.0.1"}}`),
 				),
 			}, withAppendedVolumes(corev1.Volume{
 				Name: "asdf",
@@ -461,18 +484,23 @@ func TestMakePodSpec(t *testing.T) {
 			})),
 	}, {
 		name: "concurrency=1 no owner",
-		rev:  revision(withContainerConcurrency(1)),
-		lc:   &logging.Config{},
-		tc:   &tracingconfig.Config{},
-		oc:   &metrics.ObservabilityConfig{},
-		ac:   &autoscaler.Config{},
-		cc:   &deployment.Config{},
+		rev: revision(
+			withContainerConcurrency(1),
+			func(revision *v1alpha1.Revision) {
+				container(revision.Spec.GetContainer(),
+					withTCPReadinessProbe(),
+				)
+			},
+		),
+		lc: &logging.Config{},
+		tc: &tracingconfig.Config{},
+		oc: &metrics.ObservabilityConfig{},
+		cc: &deployment.Config{},
 		want: podSpec(
 			[]corev1.Container{
 				userContainer(),
 				queueContainer(
 					withEnvVar("CONTAINER_CONCURRENCY", "1"),
-					withEnvVar("SERVING_READINESS_PROBE", ""),
 				),
 			}),
 	}, {
@@ -483,12 +511,14 @@ func TestMakePodSpec(t *testing.T) {
 				revision.Status = v1alpha1.RevisionStatus{
 					ImageDigest: "busybox@sha256:deadbeef",
 				}
+				container(revision.Spec.GetContainer(),
+					withTCPReadinessProbe(),
+				)
 			},
 		),
 		lc: &logging.Config{},
 		tc: &tracingconfig.Config{},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: podSpec(
 			[]corev1.Container{
@@ -497,7 +527,6 @@ func TestMakePodSpec(t *testing.T) {
 				}),
 				queueContainer(
 					withEnvVar("CONTAINER_CONCURRENCY", "1"),
-					withEnvVar("SERVING_READINESS_PROBE", ""),
 				),
 			}),
 	}, {
@@ -505,11 +534,15 @@ func TestMakePodSpec(t *testing.T) {
 		rev: revision(
 			withContainerConcurrency(1),
 			withOwnerReference("parent-config"),
+			func(revision *v1alpha1.Revision) {
+				container(revision.Spec.GetContainer(),
+					withTCPReadinessProbe(),
+				)
+			},
 		),
 		lc: &logging.Config{},
 		tc: &tracingconfig.Config{},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: podSpec(
 			[]corev1.Container{
@@ -517,7 +550,6 @@ func TestMakePodSpec(t *testing.T) {
 				queueContainer(
 					withEnvVar("SERVING_CONFIGURATION", "parent-config"),
 					withEnvVar("CONTAINER_CONCURRENCY", "1"),
-					withEnvVar("SERVING_READINESS_PROBE", ""),
 				),
 			}),
 	}, {
@@ -530,7 +562,6 @@ func TestMakePodSpec(t *testing.T) {
 		lc: &logging.Config{},
 		tc: &tracingconfig.Config{},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: podSpec(
 			[]corev1.Container{
@@ -555,7 +586,6 @@ func TestMakePodSpec(t *testing.T) {
 		lc: &logging.Config{},
 		tc: &tracingconfig.Config{},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: podSpec(
 			[]corev1.Container{
@@ -575,7 +605,6 @@ func TestMakePodSpec(t *testing.T) {
 		lc: &logging.Config{},
 		tc: &tracingconfig.Config{},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: podSpec(
 			[]corev1.Container{
@@ -583,13 +612,14 @@ func TestMakePodSpec(t *testing.T) {
 					withExecReadinessProbe([]string{"echo", "hello"})),
 				queueContainer(
 					withEnvVar("CONTAINER_CONCURRENCY", "0"),
-					withEnvVar("SERVING_READINESS_PROBE", "{}"),
+					withEnvVar("SERVING_READINESS_PROBE", `{"tcpSocket":{"port":8080,"host":"127.0.0.1"}}`),
 				),
 			}),
 	}, {
 		name: "with http liveness probe",
 		rev: revision(func(revision *v1alpha1.Revision) {
 			container(revision.Spec.GetContainer(),
+				withTCPReadinessProbe(),
 				withLivenessProbe(corev1.Handler{
 					HTTPGet: &corev1.HTTPGetAction{
 						Path: "/",
@@ -600,7 +630,6 @@ func TestMakePodSpec(t *testing.T) {
 		lc: &logging.Config{},
 		tc: &tracingconfig.Config{},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: podSpec(
 			[]corev1.Container{
@@ -618,13 +647,13 @@ func TestMakePodSpec(t *testing.T) {
 				),
 				queueContainer(
 					withEnvVar("CONTAINER_CONCURRENCY", "0"),
-					withEnvVar("SERVING_READINESS_PROBE", ""),
 				),
 			}),
 	}, {
 		name: "with tcp liveness probe",
 		rev: revision(func(revision *v1alpha1.Revision) {
 			container(revision.Spec.GetContainer(),
+				withTCPReadinessProbe(),
 				withLivenessProbe(corev1.Handler{
 					TCPSocket: &corev1.TCPSocketAction{},
 				}),
@@ -633,7 +662,6 @@ func TestMakePodSpec(t *testing.T) {
 		lc: &logging.Config{},
 		tc: &tracingconfig.Config{},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: podSpec(
 			[]corev1.Container{
@@ -646,18 +674,21 @@ func TestMakePodSpec(t *testing.T) {
 				),
 				queueContainer(
 					withEnvVar("CONTAINER_CONCURRENCY", "0"),
-					withEnvVar("SERVING_READINESS_PROBE", ""),
 				),
 			}),
 	}, {
 		name: "with /var/log collection",
-		rev:  revision(withContainerConcurrency(1)),
-		lc:   &logging.Config{},
-		tc:   &tracingconfig.Config{},
+		rev: revision(withContainerConcurrency(1),
+			func(revision *v1alpha1.Revision) {
+				container(revision.Spec.GetContainer(),
+					withTCPReadinessProbe(),
+				)
+			}),
+		lc: &logging.Config{},
+		tc: &tracingconfig.Config{},
 		oc: &metrics.ObservabilityConfig{
 			EnableVarLogCollection: true,
 		},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: podSpec(
 			[]corev1.Container{
@@ -666,7 +697,6 @@ func TestMakePodSpec(t *testing.T) {
 					withEnvVar("CONTAINER_CONCURRENCY", "1"),
 					withEnvVar("ENABLE_VAR_LOG_COLLECTION", "true"),
 					withInternalVolumeMount(),
-					withEnvVar("SERVING_READINESS_PROBE", ""),
 				),
 			},
 			func(podSpec *corev1.PodSpec) {
@@ -682,6 +712,7 @@ func TestMakePodSpec(t *testing.T) {
 				revision.Spec.GetContainer().Command = []string{"/bin/bash"}
 				revision.Spec.GetContainer().Args = []string{"-c", "echo Hello world"}
 				container(revision.Spec.GetContainer(),
+					withTCPReadinessProbe(),
 					withEnvVar("FOO", "bar"),
 					withEnvVar("BAZ", "blah"),
 				)
@@ -701,7 +732,6 @@ func TestMakePodSpec(t *testing.T) {
 		lc: &logging.Config{},
 		tc: &tracingconfig.Config{},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: podSpec(
 			[]corev1.Container{
@@ -733,7 +763,6 @@ func TestMakePodSpec(t *testing.T) {
 				),
 				queueContainer(
 					withEnvVar("CONTAINER_CONCURRENCY", "1"),
-					withEnvVar("SERVING_READINESS_PROBE", ""),
 					withEnvVar("SERVING_SERVICE", ""),
 				),
 			}),
@@ -744,7 +773,10 @@ func TestMakePodSpec(t *testing.T) {
 			quantityComparer := cmp.Comparer(func(x, y resource.Quantity) bool {
 				return x.Cmp(y) == 0
 			})
-			got := makePodSpec(test.rev, test.lc, test.tc, test.oc, test.ac, test.cc)
+			got, err := makePodSpec(test.rev, test.lc, test.tc, test.oc, test.cc)
+			if err != nil {
+				t.Fatal("makePodSpec returned errror")
+			}
 			if diff := cmp.Diff(test.want, got, quantityComparer); diff != "" {
 				t.Errorf("makePodSpec (-want, +got) = %v", diff)
 			}
@@ -761,11 +793,28 @@ func TestMakePodSpec(t *testing.T) {
 			}
 			test.rev.Spec.DeprecatedContainer = nil
 
-			got := makePodSpec(test.rev, test.lc, test.tc, test.oc, test.ac, test.cc)
+			got, err := makePodSpec(test.rev, test.lc, test.tc, test.oc, test.cc)
+			if err != nil {
+				t.Fatal("makePodSpec returned errror")
+			}
 			if diff := cmp.Diff(test.want, got, quantityComparer); diff != "" {
 				t.Errorf("makePodSpec (-want, +got) = %v", diff)
 			}
 		})
+	}
+}
+
+func TestMissingProbeError(t *testing.T) {
+	_, err := MakeDeployment(defaultRevision,
+		&logging.Config{},
+		&tracingconfig.Config{},
+		&network.Config{},
+		&metrics.ObservabilityConfig{},
+		&deployment.Config{},
+	)
+
+	if err == nil {
+		t.Error("expected error from MakeDeployment")
 	}
 }
 
@@ -777,7 +826,6 @@ func TestMakeDeployment(t *testing.T) {
 		tc   *tracingconfig.Config
 		nc   *network.Config
 		oc   *metrics.ObservabilityConfig
-		ac   *autoscaler.Config
 		cc   *deployment.Config
 		want *appsv1.Deployment
 	}{{
@@ -785,12 +833,21 @@ func TestMakeDeployment(t *testing.T) {
 		rev: revision(
 			withoutLabels,
 			withContainerConcurrency(1),
+			func(revision *v1alpha1.Revision) {
+				container(revision.Spec.GetContainer(),
+					withReadinessProbe(corev1.Handler{
+						TCPSocket: &corev1.TCPSocketAction{
+							Host: "127.0.0.1",
+							Port: intstr.FromInt(12345),
+						},
+					}),
+				)
+			},
 		),
 		lc:   &logging.Config{},
 		tc:   &tracingconfig.Config{},
 		nc:   &network.Config{},
 		oc:   &metrics.ObservabilityConfig{},
-		ac:   &autoscaler.Config{},
 		cc:   &deployment.Config{},
 		want: makeDeployment(),
 	}, {
@@ -798,24 +855,44 @@ func TestMakeDeployment(t *testing.T) {
 		rev: revision(
 			withoutLabels,
 			withOwnerReference("parent-config"),
+			func(revision *v1alpha1.Revision) {
+				container(revision.Spec.GetContainer(),
+					withReadinessProbe(corev1.Handler{
+						TCPSocket: &corev1.TCPSocketAction{
+							Host: "127.0.0.1",
+							Port: intstr.FromInt(12345),
+						},
+					}),
+				)
+			},
 		),
 		lc:   &logging.Config{},
 		tc:   &tracingconfig.Config{},
 		nc:   &network.Config{},
 		oc:   &metrics.ObservabilityConfig{},
-		ac:   &autoscaler.Config{},
 		cc:   &deployment.Config{},
 		want: makeDeployment(),
 	}, {
 		name: "with outbound IP range configured",
-		rev:  revision(withoutLabels),
-		lc:   &logging.Config{},
-		tc:   &tracingconfig.Config{},
+		rev: revision(
+			withoutLabels,
+			func(revision *v1alpha1.Revision) {
+				container(revision.Spec.GetContainer(),
+					withReadinessProbe(corev1.Handler{
+						TCPSocket: &corev1.TCPSocketAction{
+							Host: "127.0.0.1",
+							Port: intstr.FromInt(12345),
+						},
+					}),
+				)
+			},
+		),
+		lc: &logging.Config{},
+		tc: &tracingconfig.Config{},
 		nc: &network.Config{
 			IstioOutboundIPRanges: "*",
 		},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: makeDeployment(func(deploy *appsv1.Deployment) {
 			deploy.Spec.Template.ObjectMeta.Annotations[IstioOutboundIPRangeAnnotation] = "*"
@@ -826,12 +903,19 @@ func TestMakeDeployment(t *testing.T) {
 			revision.ObjectMeta.Annotations = map[string]string{
 				sidecarIstioInjectAnnotation: "false",
 			}
+			container(revision.Spec.GetContainer(),
+				withReadinessProbe(corev1.Handler{
+					TCPSocket: &corev1.TCPSocketAction{
+						Host: "127.0.0.1",
+						Port: intstr.FromInt(12345),
+					},
+				}),
+			)
 		}),
 		lc: &logging.Config{},
 		tc: &tracingconfig.Config{},
 		nc: &network.Config{},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: makeDeployment(func(deploy *appsv1.Deployment) {
 			deploy.ObjectMeta.Annotations[sidecarIstioInjectAnnotation] = "false"
@@ -845,6 +929,14 @@ func TestMakeDeployment(t *testing.T) {
 				revision.ObjectMeta.Annotations = map[string]string{
 					IstioOutboundIPRangeAnnotation: "10.4.0.0/14,10.7.240.0/20",
 				}
+				container(revision.Spec.GetContainer(),
+					withReadinessProbe(corev1.Handler{
+						TCPSocket: &corev1.TCPSocketAction{
+							Host: "127.0.0.1",
+							Port: intstr.FromInt(12345),
+						},
+					}),
+				)
 			},
 		),
 		lc: &logging.Config{},
@@ -853,7 +945,6 @@ func TestMakeDeployment(t *testing.T) {
 			IstioOutboundIPRanges: "*",
 		},
 		oc: &metrics.ObservabilityConfig{},
-		ac: &autoscaler.Config{},
 		cc: &deployment.Config{},
 		want: makeDeployment(func(deploy *appsv1.Deployment) {
 			deploy.ObjectMeta.Annotations[IstioOutboundIPRangeAnnotation] = "10.4.0.0/14,10.7.240.0/20"
@@ -864,8 +955,15 @@ func TestMakeDeployment(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			// Tested above so that we can rely on it here for brevity.
-			test.want.Spec.Template.Spec = *makePodSpec(test.rev, test.lc, test.tc, test.oc, test.ac, test.cc)
-			got := MakeDeployment(test.rev, test.lc, test.tc, test.nc, test.oc, test.ac, test.cc)
+			podSpec, err := makePodSpec(test.rev, test.lc, test.tc, test.oc, test.cc)
+			if err != nil {
+				t.Fatal("makePodSpec returned errror")
+			}
+			test.want.Spec.Template.Spec = *podSpec
+			got, err := MakeDeployment(test.rev, test.lc, test.tc, test.nc, test.oc, test.cc)
+			if err != nil {
+				t.Fatalf("got unexpected error: %v", err)
+			}
 			if diff := cmp.Diff(test.want, got, cmpopts.IgnoreUnexported(resource.Quantity{})); diff != "" {
 				t.Errorf("MakeDeployment (-want, +got) = %v", diff)
 			}

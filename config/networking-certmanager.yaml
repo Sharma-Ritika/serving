@@ -31,6 +31,7 @@ spec:
         sidecar.istio.io/inject: "false"
       labels:
         app: networking-certmanager
+        serving.knative.dev/release: devel
     spec:
       serviceAccountName: controller
       containers:
@@ -48,9 +49,8 @@ spec:
         ports:
         - name: metrics
           containerPort: 9090
-        volumeMounts:
-        - name: config-logging
-          mountPath: /etc/config-logging
+        - name: profiling
+          containerPort: 8008
         env:
         - name: SYSTEM_NAMESPACE
           valueFrom:
@@ -64,7 +64,3 @@ spec:
           value: knative.dev/serving
         securityContext:
           allowPrivilegeEscalation: false
-      volumes:
-        - name: config-logging
-          configMap:
-            name: config-logging

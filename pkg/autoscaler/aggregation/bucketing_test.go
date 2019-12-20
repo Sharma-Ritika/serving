@@ -42,13 +42,13 @@ func TestTimedFloat64Buckets(t *testing.T) {
 		name:        "granularity = 1s",
 		granularity: 1 * time.Second,
 		stats: []args{
-			{trunc1, pod, 1.0},
-			{trunc1.Add(100 * time.Millisecond), pod, 1.0}, // same bucket
-			{trunc1.Add(1 * time.Second), pod, 1.0},        // next bucket
-			{trunc1.Add(3 * time.Second), pod, 1.0},        // nextnextnext bucket
+			{trunc1, pod, 1.0}, // activator scale from 0.
+			{trunc1.Add(100 * time.Millisecond), pod, 10.0}, // from scraping pod/sent by activator.
+			{trunc1.Add(1 * time.Second), pod, 1.0},         // next bucket
+			{trunc1.Add(3 * time.Second), pod, 1.0},         // nextnextnext bucket
 		},
 		want: map[time.Time]float64{
-			trunc1:                      1.0,
+			trunc1:                      11.0,
 			trunc1.Add(1 * time.Second): 1.0,
 			trunc1.Add(3 * time.Second): 1.0,
 		},
@@ -61,7 +61,7 @@ func TestTimedFloat64Buckets(t *testing.T) {
 			{trunc5.Add(6 * time.Second), pod, 1.0}, // next bucket
 		},
 		want: map[time.Time]float64{
-			trunc5:                      1.0,
+			trunc5:                      2.0,
 			trunc5.Add(5 * time.Second): 1.0,
 		},
 	}, {
@@ -79,25 +79,28 @@ func TestTimedFloat64Buckets(t *testing.T) {
 
 			got := make(map[time.Time]float64)
 			for time, bucket := range buckets.buckets {
-				got[time] = bucket.Sum()
+				got[time] = bucket
 			}
 
 			if !cmp.Equal(tt.want, got) {
 				t.Errorf("Unexpected values (-want +got): %v", cmp.Diff(tt.want, got))
 			}
-			if len(tt.want) == 0 && !buckets.IsEmpty() {
+			if len(tt.want) == 0 && !buckets.isEmpty() {
 				t.Error("IsEmpty() = false, want true")
 			}
 		})
 	}
 }
 
-func TestTimedFloat64Buckets_ForEachBucket(t *testing.T) {
-	pod := "pod"
-	granularity := 1 * time.Second
+func TestTimedFloat64BucketsForEachBucket(t *testing.T) {
+	const pod = "pod"
+	granularity := time.Second
 	trunc1 := time.Now().Truncate(granularity)
 	buckets := NewTimedFloat64Buckets(granularity)
 
+	if buckets.ForEachBucket(func(time time.Time, bucket float64) {}) {
+		t.Fatalf("ForEachBucket unexpectedly returned non-empty result")
+	}
 	buckets.Record(trunc1, pod, 10.0)
 	buckets.Record(trunc1.Add(1*time.Second), pod, 10.0)
 	buckets.Record(trunc1.Add(2*time.Second), pod, 5.0)
@@ -105,14 +108,16 @@ func TestTimedFloat64Buckets_ForEachBucket(t *testing.T) {
 
 	acc1 := 0
 	acc2 := 0
-	buckets.ForEachBucket(
-		func(time time.Time, bucket float64Bucket) {
+	if !buckets.ForEachBucket(
+		func(time.Time, float64) {
 			acc1++
 		},
-		func(time time.Time, bucket float64Bucket) {
+		func(time.Time, float64) {
 			acc2++
 		},
-	)
+	) {
+		t.Fatal("ForEachBucket unexpectedly returned empty result")
+	}
 
 	want := 4
 	if acc1 != want {
@@ -123,7 +128,7 @@ func TestTimedFloat64Buckets_ForEachBucket(t *testing.T) {
 	}
 }
 
-func TestTimedFloat64Buckets_RemoveOlderThan(t *testing.T) {
+func TestTimedFloat64BucketsRemoveOlderThan(t *testing.T) {
 	pod := "pod"
 	zero := time.Now()
 	trunc1 := zero.Truncate(1 * time.Second)
@@ -201,54 +206,6 @@ func TestTimedFloat64Buckets_RemoveOlderThan(t *testing.T) {
 				if !got[want] {
 					t.Errorf("Expected buckets to contain %v, buckets: %v", want, got)
 				}
-			}
-		})
-	}
-}
-
-func TestFloat64Bucket(t *testing.T) {
-	tests := []struct {
-		name  string
-		stats map[string][]float64
-		want  float64
-	}{{
-		name: "sum of value",
-		stats: map[string][]float64{
-			"test1": {1.0},
-			"test2": {2.0},
-			"test3": {3.0},
-		},
-		want: 6.0,
-	}, {
-		name: "average same first",
-		stats: map[string][]float64{
-			"test1": {1.0, 8.0},      // average = 4.5
-			"test2": {1.0, 3.0, 5.0}, // average = 3
-		},
-		want: 7.5,
-	}, {
-		name:  "no values",
-		stats: map[string][]float64{},
-		want:  0.0,
-	}, {
-		name: "only zeroes",
-		stats: map[string][]float64{
-			"test1": {0.0, 0.0},
-			"test2": {0.0},
-		},
-		want: 0.0,
-	}}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			bucket := float64Bucket{}
-			for name, values := range tt.stats {
-				for _, value := range values {
-					bucket.Record(name, value)
-				}
-			}
-
-			if got := bucket.Sum(); got != tt.want {
-				t.Errorf("Average() = %v, want %v", got, tt.want)
 			}
 		})
 	}

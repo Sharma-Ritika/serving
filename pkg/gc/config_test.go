@@ -28,8 +28,6 @@ import (
 )
 
 func TestOurConfig(t *testing.T) {
-	defer logtesting.ClearAll()
-
 	actual, example := ConfigMapsFromTestFile(t, "config-gc")
 	for _, tt := range []struct {
 		name string
@@ -37,22 +35,22 @@ func TestOurConfig(t *testing.T) {
 		want *Config
 		data *corev1.ConfigMap
 	}{{
-		name: "actual config",
+		name: "Actual config",
 		fail: false,
 		want: &Config{
-			StaleRevisionCreateDelay:        24 * time.Hour,
+			StaleRevisionCreateDelay:        48 * time.Hour,
 			StaleRevisionTimeout:            15 * time.Hour,
-			StaleRevisionMinimumGenerations: 1,
+			StaleRevisionMinimumGenerations: 20,
 			StaleRevisionLastpinnedDebounce: 5 * time.Hour,
 		},
 		data: actual,
 	}, {
-		name: "example config",
+		name: "Example config",
 		fail: false,
 		want: &Config{
-			StaleRevisionCreateDelay:        24 * time.Hour,
+			StaleRevisionCreateDelay:        48 * time.Hour,
 			StaleRevisionTimeout:            15 * time.Hour,
-			StaleRevisionMinimumGenerations: 1,
+			StaleRevisionMinimumGenerations: 20,
 			StaleRevisionLastpinnedDebounce: 5 * time.Hour,
 		},
 		data: example,
@@ -115,13 +113,13 @@ func TestOurConfig(t *testing.T) {
 		},
 	}} {
 		t.Run(tt.name, func(t *testing.T) {
-			testConfig, err := NewConfigFromConfigMapFunc(logtesting.TestLogger(t), 10*time.Hour)(tt.data)
+			testConfig, err := NewConfigFromConfigMapFunc(logtesting.TestContextWithLogger(t))(tt.data)
 			if tt.fail != (err != nil) {
-				t.Errorf("Unexpected error value: %v", err)
+				t.Fatalf("Unexpected error value: %v", err)
 			}
 
 			if diff := cmp.Diff(tt.want, testConfig); diff != "" {
-				t.Errorf("Unexpected controller config (-want, +got): %v", diff)
+				t.Errorf("Unexpected controller config (-want, +got): %s", diff)
 			}
 		})
 	}

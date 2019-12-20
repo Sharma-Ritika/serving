@@ -18,21 +18,26 @@ package revision
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn/k8schain"
 	"go.uber.org/zap"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	appsv1listers "k8s.io/client-go/listers/apps/v1"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+
 	cachinglisters "knative.dev/caching/pkg/client/listers/caching/v1alpha1"
 	"knative.dev/pkg/controller"
-	commonlogging "knative.dev/pkg/logging"
+	"knative.dev/pkg/logging"
+	v1 "knative.dev/serving/pkg/apis/serving/v1"
 	"knative.dev/serving/pkg/apis/serving/v1alpha1"
 	"knative.dev/serving/pkg/apis/serving/v1beta1"
 	palisters "knative.dev/serving/pkg/client/listers/autoscaling/v1alpha1"
@@ -68,22 +73,22 @@ var _ controller.Reconciler = (*Reconciler)(nil)
 // converge the two. It then updates the Status block of the Revision resource
 // with the current status of the resource.
 func (c *Reconciler) Reconcile(ctx context.Context, key string) error {
-	// Convert the namespace/name string into a distinct namespace and name
+	logger := logging.FromContext(ctx)
+	ctx = c.configStore.ToContext(ctx)
+
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
-		c.Logger.Errorf("invalid resource key: %s", key)
+		logger.Errorw("Invalid resource key", zap.Error(err))
 		return nil
 	}
-	logger := commonlogging.FromContext(ctx)
-	logger.Info("Running reconcile Revision")
 
-	ctx = c.configStore.ToContext(ctx)
+	logger.Info("Running reconcile Revision")
 
 	// Get the Revision resource with this namespace/name
 	original, err := c.revisionLister.Revisions(namespace).Get(name)
 	// The resource may no longer exist, in which case we stop processing.
 	if apierrs.IsNotFound(err) {
-		logger.Errorf("revision %q in work queue no longer exists", key)
+		logger.Info("Revision in work queue no longer exists")
 		return nil
 	} else if err != nil {
 		return err
@@ -100,7 +105,7 @@ func (c *Reconciler) Reconcile(ctx context.Context, key string) error {
 		// This is important because the copy we loaded from the informer's
 		// cache may be stale and we don't want to overwrite a prior update
 		// to status with this stale state.
-	} else if _, err = c.updateStatus(rev); err != nil {
+	} else if err = c.updateStatus(original, rev); err != nil {
 		logger.Warnw("Failed to update revision status", zap.Error(err))
 		c.Recorder.Eventf(rev, corev1.EventTypeWarning, "UpdateFailed",
 			"Failed to update status for Revision %q: %v", rev.Name, err)
@@ -129,17 +134,21 @@ func (c *Reconciler) reconcileDigest(ctx context.Context, rev *v1alpha1.Revision
 		return nil
 	}
 
+	var imagePullSecrets []string
+	for _, s := range rev.Spec.ImagePullSecrets {
+		imagePullSecrets = append(imagePullSecrets, s.Name)
+	}
 	cfgs := config.FromContext(ctx)
 	opt := k8schain.Options{
 		Namespace:          rev.Namespace,
 		ServiceAccountName: rev.Spec.ServiceAccountName,
-		// ImagePullSecrets: Not possible via RevisionSpec, since we
-		// don't expose such a field.
+		ImagePullSecrets:   imagePullSecrets,
 	}
 	digest, err := c.resolver.Resolve(rev.Spec.GetContainer().Image,
 		opt, cfgs.Deployment.RegistriesSkippingTagResolving)
 	if err != nil {
-		rev.Status.MarkContainerMissing(
+		err = fmt.Errorf("failed to resolve image to digest: %w", err)
+		rev.Status.MarkContainerHealthyFalse(v1alpha1.ContainerMissing,
 			v1alpha1.RevisionContainerMissingMessage(
 				rev.Spec.GetContainer().Image, err.Error()))
 		return err
@@ -151,7 +160,6 @@ func (c *Reconciler) reconcileDigest(ctx context.Context, rev *v1alpha1.Revision
 }
 
 func (c *Reconciler) reconcile(ctx context.Context, rev *v1alpha1.Revision) error {
-	logger := commonlogging.FromContext(ctx)
 	if rev.GetDeletionTimestamp() != nil {
 		return nil
 	}
@@ -161,7 +169,7 @@ func (c *Reconciler) reconcile(ctx context.Context, rev *v1alpha1.Revision) erro
 	// and may not have had all of the assumed defaults specified.  This won't result
 	// in this getting written back to the API Server, but lets downstream logic make
 	// assumptions about defaulting.
-	rev.SetDefaults(v1beta1.WithUpgradeViaDefaulting(ctx))
+	rev.SetDefaults(v1.WithUpgradeViaDefaulting(ctx))
 
 	rev.Status.InitializeConditions()
 	c.updateRevisionLoggingURL(ctx, rev)
@@ -193,7 +201,6 @@ func (c *Reconciler) reconcile(ctx context.Context, rev *v1alpha1.Revision) erro
 
 	for _, phase := range phases {
 		if err := phase.f(ctx, rev); err != nil {
-			logger.Errorw("Failed to reconcile", zap.String("phase", phase.name), zap.Error(err))
 			return err
 		}
 	}
@@ -225,17 +232,24 @@ func (c *Reconciler) updateRevisionLoggingURL(
 		"${REVISION_UID}", uid, -1)
 }
 
-func (c *Reconciler) updateStatus(desired *v1alpha1.Revision) (*v1alpha1.Revision, error) {
-	rev, err := c.revisionLister.Revisions(desired.Namespace).Get(desired.Name)
-	if err != nil {
-		return nil, err
-	}
-	// If there's nothing to update, just return.
-	if reflect.DeepEqual(rev.Status, desired.Status) {
-		return rev, nil
-	}
-	// Don't modify the informers copy
-	existing := rev.DeepCopy()
-	existing.Status = desired.Status
-	return c.ServingClientSet.ServingV1alpha1().Revisions(desired.Namespace).UpdateStatus(existing)
+func (c *Reconciler) updateStatus(existing *v1alpha1.Revision, desired *v1alpha1.Revision) error {
+	existing = existing.DeepCopy()
+	return reconciler.RetryUpdateConflicts(func(attempts int) (err error) {
+		// The first iteration tries to use the informer's state, subsequent attempts fetch the latest state via API.
+		if attempts > 0 {
+			existing, err = c.ServingClientSet.ServingV1alpha1().Revisions(desired.Namespace).Get(desired.Name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+		}
+
+		// If there's nothing to update, just return.
+		if reflect.DeepEqual(existing.Status, desired.Status) {
+			return nil
+		}
+
+		existing.Status = desired.Status
+		_, err = c.ServingClientSet.ServingV1alpha1().Revisions(desired.Namespace).UpdateStatus(existing)
+		return err
+	})
 }

@@ -19,8 +19,9 @@ package serverlessservice
 import (
 	"context"
 
-	endpointsinformer "knative.dev/pkg/injection/informers/kubeinformers/corev1/endpoints"
-	serviceinformer "knative.dev/pkg/injection/informers/kubeinformers/corev1/service"
+	endpointsinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/endpoints"
+	serviceinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/service"
+	"knative.dev/serving/pkg/client/injection/ducks/autoscaling/v1alpha1/podscalable"
 	sksinformer "knative.dev/serving/pkg/client/injection/informers/networking/v1alpha1/serverlessservice"
 	pkgreconciler "knative.dev/serving/pkg/reconciler"
 
@@ -28,10 +29,8 @@ import (
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/system"
-	"knative.dev/serving/pkg/activator"
 	"knative.dev/serving/pkg/apis/networking"
 	netv1alpha1 "knative.dev/serving/pkg/apis/networking/v1alpha1"
-	presources "knative.dev/serving/pkg/resources"
 )
 
 const (
@@ -53,7 +52,7 @@ func NewController(
 		endpointsLister:   endpointsInformer.Lister(),
 		serviceLister:     serviceInformer.Lister(),
 		sksLister:         sksInformer.Lister(),
-		psInformerFactory: presources.NewPodScalableInformerFactory(ctx),
+		psInformerFactory: podscalable.Get(ctx),
 	}
 	impl := controller.NewImpl(c, c.Logger, reconcilerName)
 
@@ -85,7 +84,7 @@ func NewController(
 		// Accept only ActivatorService K8s service objects.
 		FilterFunc: pkgreconciler.ChainFilterFuncs(
 			pkgreconciler.NamespaceFilterFunc(system.Namespace()),
-			pkgreconciler.NameFilterFunc(activator.K8sServiceName)),
+			pkgreconciler.NameFilterFunc(networking.ActivatorServiceName)),
 		Handler: controller.HandleAll(grCb),
 	})
 

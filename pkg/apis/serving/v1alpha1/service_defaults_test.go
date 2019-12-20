@@ -21,11 +21,14 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	"knative.dev/pkg/ptr"
 
+	"knative.dev/pkg/apis"
 	"knative.dev/serving/pkg/apis/config"
-	"knative.dev/serving/pkg/apis/serving/v1beta1"
+	"knative.dev/serving/pkg/apis/serving"
+	v1 "knative.dev/serving/pkg/apis/serving/v1"
 )
 
 func TestServiceDefaulting(t *testing.T) {
@@ -42,9 +45,9 @@ func TestServiceDefaulting(t *testing.T) {
 			Spec: ServiceSpec{
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							LatestRevision: ptr.Bool(true),
-							Percent:        100,
+							Percent:        ptr.Int64(100),
 						},
 					}},
 				},
@@ -84,8 +87,9 @@ func TestServiceDefaulting(t *testing.T) {
 					Configuration: ConfigurationSpec{
 						DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 							Spec: RevisionSpec{
-								RevisionSpec: v1beta1.RevisionSpec{
-									TimeoutSeconds: ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+								RevisionSpec: v1.RevisionSpec{
+									TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+									ContainerConcurrency: ptr.Int64(config.DefaultContainerConcurrency),
 								},
 								DeprecatedContainer: &corev1.Container{
 									Name:           config.DefaultUserContainerName,
@@ -100,7 +104,7 @@ func TestServiceDefaulting(t *testing.T) {
 		},
 	}, {
 		name: "run latest (lemonade)",
-		wc:   v1beta1.WithUpgradeViaDefaulting,
+		wc:   v1.WithUpgradeViaDefaulting,
 		in: &Service{
 			Spec: ServiceSpec{
 				DeprecatedRunLatest: &RunLatestType{
@@ -121,8 +125,9 @@ func TestServiceDefaulting(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					Template: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
-								TimeoutSeconds: ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+							RevisionSpec: v1.RevisionSpec{
+								TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+								ContainerConcurrency: ptr.Int64(config.DefaultContainerConcurrency),
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Name:           config.DefaultUserContainerName,
@@ -137,9 +142,9 @@ func TestServiceDefaulting(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							LatestRevision: ptr.Bool(true),
-							Percent:        100,
+							Percent:        ptr.Int64(100),
 						},
 					}},
 				},
@@ -154,8 +159,8 @@ func TestServiceDefaulting(t *testing.T) {
 						DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 							Spec: RevisionSpec{
 								DeprecatedContainer: &corev1.Container{},
-								RevisionSpec: v1beta1.RevisionSpec{
-									ContainerConcurrency: 1,
+								RevisionSpec: v1.RevisionSpec{
+									ContainerConcurrency: ptr.Int64(1),
 									TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
 								},
 							},
@@ -170,8 +175,8 @@ func TestServiceDefaulting(t *testing.T) {
 					Configuration: ConfigurationSpec{
 						DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 							Spec: RevisionSpec{
-								RevisionSpec: v1beta1.RevisionSpec{
-									ContainerConcurrency: 1,
+								RevisionSpec: v1.RevisionSpec{
+									ContainerConcurrency: ptr.Int64(1),
 									TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
 								},
 								DeprecatedContainer: &corev1.Container{
@@ -206,8 +211,9 @@ func TestServiceDefaulting(t *testing.T) {
 					Configuration: ConfigurationSpec{
 						DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 							Spec: RevisionSpec{
-								RevisionSpec: v1beta1.RevisionSpec{
-									TimeoutSeconds: ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+								RevisionSpec: v1.RevisionSpec{
+									TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+									ContainerConcurrency: ptr.Int64(config.DefaultContainerConcurrency),
 								},
 								DeprecatedContainer: &corev1.Container{
 									Name:           config.DefaultUserContainerName,
@@ -222,7 +228,7 @@ func TestServiceDefaulting(t *testing.T) {
 		},
 	}, {
 		name: "pinned (lemonade)",
-		wc:   v1beta1.WithUpgradeViaDefaulting,
+		wc:   v1.WithUpgradeViaDefaulting,
 		in: &Service{
 			Spec: ServiceSpec{
 				DeprecatedPinned: &PinnedType{
@@ -244,8 +250,9 @@ func TestServiceDefaulting(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					Template: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
-								TimeoutSeconds: ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+							RevisionSpec: v1.RevisionSpec{
+								TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+								ContainerConcurrency: ptr.Int64(config.DefaultContainerConcurrency),
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Name:           config.DefaultUserContainerName,
@@ -260,9 +267,9 @@ func TestServiceDefaulting(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							RevisionName:   "asdf",
-							Percent:        100,
+							Percent:        ptr.Int64(100),
 							LatestRevision: ptr.Bool(false),
 						},
 					}},
@@ -278,8 +285,8 @@ func TestServiceDefaulting(t *testing.T) {
 						DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 							Spec: RevisionSpec{
 								DeprecatedContainer: &corev1.Container{},
-								RevisionSpec: v1beta1.RevisionSpec{
-									ContainerConcurrency: 1,
+								RevisionSpec: v1.RevisionSpec{
+									ContainerConcurrency: ptr.Int64(1),
 									TimeoutSeconds:       ptr.Int64(99),
 								},
 							},
@@ -294,8 +301,8 @@ func TestServiceDefaulting(t *testing.T) {
 					Configuration: ConfigurationSpec{
 						DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 							Spec: RevisionSpec{
-								RevisionSpec: v1beta1.RevisionSpec{
-									ContainerConcurrency: 1,
+								RevisionSpec: v1.RevisionSpec{
+									ContainerConcurrency: ptr.Int64(1),
 									TimeoutSeconds:       ptr.Int64(99),
 								},
 								DeprecatedContainer: &corev1.Container{
@@ -334,8 +341,9 @@ func TestServiceDefaulting(t *testing.T) {
 					Configuration: ConfigurationSpec{
 						DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 							Spec: RevisionSpec{
-								RevisionSpec: v1beta1.RevisionSpec{
-									TimeoutSeconds: ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+								RevisionSpec: v1.RevisionSpec{
+									TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+									ContainerConcurrency: ptr.Int64(config.DefaultContainerConcurrency),
 								},
 								DeprecatedContainer: &corev1.Container{
 									Name:           config.DefaultUserContainerName,
@@ -350,7 +358,7 @@ func TestServiceDefaulting(t *testing.T) {
 		},
 	}, {
 		name: "release (double, lemonade)",
-		wc:   v1beta1.WithUpgradeViaDefaulting,
+		wc:   v1.WithUpgradeViaDefaulting,
 		in: &Service{
 			Spec: ServiceSpec{
 				DeprecatedRelease: &ReleaseType{
@@ -371,8 +379,9 @@ func TestServiceDefaulting(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					Template: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
-								TimeoutSeconds: ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+							RevisionSpec: v1.RevisionSpec{
+								TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+								ContainerConcurrency: ptr.Int64(config.DefaultContainerConcurrency),
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Name:           config.DefaultUserContainerName,
@@ -386,23 +395,23 @@ func TestServiceDefaulting(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							Tag:            "current",
-							Percent:        57,
+							Percent:        ptr.Int64(57),
 							RevisionName:   "foo",
 							LatestRevision: ptr.Bool(false),
 						},
 					}, {
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							Tag:            "candidate",
-							Percent:        43,
+							Percent:        ptr.Int64(43),
 							RevisionName:   "bar",
 							LatestRevision: ptr.Bool(false),
 						},
 					}, {
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							Tag:            "latest",
-							Percent:        0,
+							Percent:        nil,
 							LatestRevision: ptr.Bool(true),
 						},
 					}},
@@ -411,7 +420,7 @@ func TestServiceDefaulting(t *testing.T) {
 		},
 	}, {
 		name: "release (double, @latest, lemonade)",
-		wc:   v1beta1.WithUpgradeViaDefaulting,
+		wc:   v1.WithUpgradeViaDefaulting,
 		in: &Service{
 			Spec: ServiceSpec{
 				DeprecatedRelease: &ReleaseType{
@@ -432,8 +441,9 @@ func TestServiceDefaulting(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					Template: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
-								TimeoutSeconds: ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+							RevisionSpec: v1.RevisionSpec{
+								TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+								ContainerConcurrency: ptr.Int64(config.DefaultContainerConcurrency),
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Name:           config.DefaultUserContainerName,
@@ -447,22 +457,22 @@ func TestServiceDefaulting(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							Tag:            "current",
-							Percent:        57,
+							Percent:        ptr.Int64(57),
 							RevisionName:   "foo",
 							LatestRevision: ptr.Bool(false),
 						},
 					}, {
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							Tag:            "candidate",
-							Percent:        43,
+							Percent:        ptr.Int64(43),
 							LatestRevision: ptr.Bool(true),
 						},
 					}, {
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							Tag:            "latest",
-							Percent:        0,
+							Percent:        nil,
 							LatestRevision: ptr.Bool(true),
 						},
 					}},
@@ -471,7 +481,7 @@ func TestServiceDefaulting(t *testing.T) {
 		},
 	}, {
 		name: "release (single, lemonade)",
-		wc:   v1beta1.WithUpgradeViaDefaulting,
+		wc:   v1.WithUpgradeViaDefaulting,
 		in: &Service{
 			Spec: ServiceSpec{
 				DeprecatedRelease: &ReleaseType{
@@ -491,8 +501,9 @@ func TestServiceDefaulting(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					Template: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
-								TimeoutSeconds: ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+							RevisionSpec: v1.RevisionSpec{
+								TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+								ContainerConcurrency: ptr.Int64(config.DefaultContainerConcurrency),
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Name:           config.DefaultUserContainerName,
@@ -506,16 +517,16 @@ func TestServiceDefaulting(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							Tag:            "current",
-							Percent:        100,
+							Percent:        ptr.Int64(100),
 							RevisionName:   "foo",
 							LatestRevision: ptr.Bool(false),
 						},
 					}, {
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							Tag:            "latest",
-							Percent:        0,
+							Percent:        nil,
 							LatestRevision: ptr.Bool(true),
 						},
 					}},
@@ -531,8 +542,8 @@ func TestServiceDefaulting(t *testing.T) {
 						DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 							Spec: RevisionSpec{
 								DeprecatedContainer: &corev1.Container{},
-								RevisionSpec: v1beta1.RevisionSpec{
-									ContainerConcurrency: 1,
+								RevisionSpec: v1.RevisionSpec{
+									ContainerConcurrency: ptr.Int64(1),
 									TimeoutSeconds:       ptr.Int64(99),
 								},
 							},
@@ -547,8 +558,8 @@ func TestServiceDefaulting(t *testing.T) {
 					Configuration: ConfigurationSpec{
 						DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 							Spec: RevisionSpec{
-								RevisionSpec: v1beta1.RevisionSpec{
-									ContainerConcurrency: 1,
+								RevisionSpec: v1.RevisionSpec{
+									ContainerConcurrency: ptr.Int64(1),
 									TimeoutSeconds:       ptr.Int64(99),
 								},
 								DeprecatedContainer: &corev1.Container{
@@ -569,7 +580,7 @@ func TestServiceDefaulting(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
+							RevisionSpec: v1.RevisionSpec{
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Image: "blah",
@@ -587,8 +598,9 @@ func TestServiceDefaulting(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
-								TimeoutSeconds: ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+							RevisionSpec: v1.RevisionSpec{
+								TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+								ContainerConcurrency: ptr.Int64(config.DefaultContainerConcurrency),
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Name:           config.DefaultUserContainerName,
@@ -603,9 +615,9 @@ func TestServiceDefaulting(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							LatestRevision: ptr.Bool(true),
-							Percent:        100,
+							Percent:        ptr.Int64(100),
 						},
 					}},
 				},
@@ -626,8 +638,9 @@ func TestServiceDefaulting(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
-								TimeoutSeconds: ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+							RevisionSpec: v1.RevisionSpec{
+								TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+								ContainerConcurrency: ptr.Int64(config.DefaultContainerConcurrency),
 							},
 							DeprecatedContainer: &corev1.Container{
 								Name:           config.DefaultUserContainerName,
@@ -639,9 +652,9 @@ func TestServiceDefaulting(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							LatestRevision: ptr.Bool(true),
-							Percent:        100,
+							Percent:        ptr.Int64(100),
 						},
 					}},
 				},
@@ -654,7 +667,7 @@ func TestServiceDefaulting(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
+							RevisionSpec: v1.RevisionSpec{
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Image: "blah",
@@ -675,8 +688,9 @@ func TestServiceDefaulting(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
-								TimeoutSeconds: ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+							RevisionSpec: v1.RevisionSpec{
+								TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+								ContainerConcurrency: ptr.Int64(config.DefaultContainerConcurrency),
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Name:           config.DefaultUserContainerName,
@@ -691,9 +705,9 @@ func TestServiceDefaulting(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							LatestRevision: ptr.Bool(true),
-							Percent:        100,
+							Percent:        ptr.Int64(100),
 						},
 					}},
 				},
@@ -706,7 +720,7 @@ func TestServiceDefaulting(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
+							RevisionSpec: v1.RevisionSpec{
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Image: "blah",
@@ -718,8 +732,8 @@ func TestServiceDefaulting(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
-							Percent: 100,
+						TrafficTarget: v1.TrafficTarget{
+							Percent: ptr.Int64(100),
 						},
 					}},
 				},
@@ -730,8 +744,9 @@ func TestServiceDefaulting(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
-								TimeoutSeconds: ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+							RevisionSpec: v1.RevisionSpec{
+								TimeoutSeconds:       ptr.Int64(config.DefaultRevisionTimeoutSeconds),
+								ContainerConcurrency: ptr.Int64(config.DefaultContainerConcurrency),
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Name:           config.DefaultUserContainerName,
@@ -746,9 +761,9 @@ func TestServiceDefaulting(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							LatestRevision: ptr.Bool(true),
-							Percent:        100,
+							Percent:        ptr.Int64(100),
 						},
 					}},
 				},
@@ -769,4 +784,107 @@ func TestServiceDefaulting(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAnnotateUserInfo(t *testing.T) {
+	const (
+		u1 = "oveja@knative.dev"
+		u2 = "cabra@knative.dev"
+		u3 = "vaca@knative.dev"
+	)
+
+	withUserAnns := func(u1, u2 string, s *Service) *Service {
+		a := s.GetAnnotations()
+		if a == nil {
+			a = map[string]string{}
+			s.SetAnnotations(a)
+		}
+		a[serving.CreatorAnnotation] = u1
+		a[serving.UpdaterAnnotation] = u2
+		return s
+	}
+
+	tests := []struct {
+		name     string
+		user     string
+		this     *Service
+		prev     *Service
+		wantAnns map[string]string
+	}{{
+		name: "create-new",
+		user: u1,
+		this: &Service{},
+		prev: nil,
+		wantAnns: map[string]string{
+			serving.CreatorAnnotation: u1,
+			serving.UpdaterAnnotation: u1,
+		},
+	}, {
+		// Old objects don't have the annotation, and unless there's a change in
+		// data they won't get it.
+		name:     "update-no-diff-old-object",
+		user:     u1,
+		this:     &Service{},
+		prev:     &Service{},
+		wantAnns: map[string]string{},
+	}, {
+		name: "update-no-diff-new-object",
+		user: u2,
+		this: withUserAnns(u1, u1, &Service{}),
+		prev: withUserAnns(u1, u1, &Service{}),
+		wantAnns: map[string]string{
+			serving.CreatorAnnotation: u1,
+			serving.UpdaterAnnotation: u1,
+		},
+	}, {
+		name: "update-diff-old-object",
+		user: u2,
+		this: &Service{
+			Spec: ServiceSpec{
+				DeprecatedRelease: &ReleaseType{},
+			},
+		},
+		prev: &Service{
+			Spec: ServiceSpec{
+				DeprecatedRunLatest: &RunLatestType{},
+			},
+		},
+		wantAnns: map[string]string{
+			serving.UpdaterAnnotation: u2,
+		},
+	}, {
+		name: "update-diff-new-object",
+		user: u3,
+		this: withUserAnns(u1, u2, &Service{
+			Spec: ServiceSpec{
+				DeprecatedRelease: &ReleaseType{},
+			},
+		}),
+		prev: withUserAnns(u1, u2, &Service{
+			Spec: ServiceSpec{
+				DeprecatedRunLatest: &RunLatestType{},
+			},
+		}),
+		wantAnns: map[string]string{
+			serving.CreatorAnnotation: u1,
+			serving.UpdaterAnnotation: u3,
+		},
+	}}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := apis.WithUserInfo(context.Background(), &authv1.UserInfo{
+				Username: test.user,
+			})
+			if test.prev != nil {
+				ctx = apis.WithinUpdate(ctx, test.prev)
+				test.prev.SetDefaults(ctx)
+			}
+			test.this.SetDefaults(ctx)
+			if got, want := test.this.GetAnnotations(), test.wantAnns; !cmp.Equal(got, want) {
+				t.Errorf("Annotations = %v, want: %v, diff (-got, +want): %s", got, want, cmp.Diff(got, want))
+			}
+		})
+	}
+
 }

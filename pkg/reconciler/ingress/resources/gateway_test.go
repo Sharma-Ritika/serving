@@ -22,17 +22,20 @@ import (
 	"hash/adler32"
 	"testing"
 
-	"knative.dev/serving/pkg/apis/networking"
-
 	"github.com/google/go-cmp/cmp"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kubeinformers "k8s.io/client-go/informers"
-	kubefake "k8s.io/client-go/kubernetes/fake"
 	corev1listers "k8s.io/client-go/listers/core/v1"
-	"knative.dev/pkg/apis/istio/v1alpha3"
+
+	istiov1alpha3 "istio.io/api/networking/v1alpha3"
+	"istio.io/client-go/pkg/apis/networking/v1alpha3"
+	fakekubeclient "knative.dev/pkg/client/injection/kube/client/fake"
+	fakeserviceinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/service/fake"
 	"knative.dev/pkg/kmeta"
+	rtesting "knative.dev/pkg/reconciler/testing"
 	"knative.dev/pkg/system"
+	"knative.dev/serving/pkg/apis/networking"
 	"knative.dev/serving/pkg/apis/networking/v1alpha1"
 	"knative.dev/serving/pkg/network"
 	"knative.dev/serving/pkg/reconciler/ingress/config"
@@ -57,79 +60,122 @@ var selector = map[string]string{
 }
 
 var gateway = v1alpha3.Gateway{
-	Spec: v1alpha3.GatewaySpec{
-		Servers: []v1alpha3.Server{{
-			Hosts: []string{"host1.example.com"},
-			Port: v1alpha3.Port{
-				Name:     "clusteringress:0",
-				Number:   443,
-				Protocol: v1alpha3.ProtocolHTTPS,
-			},
-			TLS: &v1alpha3.TLSOptions{
-				Mode:              v1alpha3.TLSModeSimple,
-				ServerCertificate: "tls.crt",
-				PrivateKey:        "tls.key",
-			},
-		}, {
-			Hosts: []string{"host2.example.com"},
-			Port: v1alpha3.Port{
-				Name:     "non-clusteringress:0",
-				Number:   443,
-				Protocol: v1alpha3.ProtocolHTTPS,
-			},
-			TLS: &v1alpha3.TLSOptions{
-				Mode:              v1alpha3.TLSModeSimple,
-				ServerCertificate: "tls.crt",
-				PrivateKey:        "tls.key",
-			},
-		}},
+	Spec: istiov1alpha3.Gateway{
+		Servers: servers,
 	},
 }
 
-var httpServer = v1alpha3.Server{
+var servers = []*istiov1alpha3.Server{
+	{
+		Hosts: []string{"host1.example.com"},
+		Port: &istiov1alpha3.Port{
+			Name:     "test-ns/ingress:0",
+			Number:   443,
+			Protocol: "HTTPS",
+		},
+		Tls: &istiov1alpha3.Server_TLSOptions{
+			Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
+			ServerCertificate: "tls.crt",
+			PrivateKey:        "tls.key",
+		},
+	}, {
+		Hosts: []string{"host2.example.com"},
+		Port: &istiov1alpha3.Port{
+			Name:     "test-ns/non-ingress:0",
+			Number:   443,
+			Protocol: "HTTPS",
+		},
+		Tls: &istiov1alpha3.Server_TLSOptions{
+			Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
+			ServerCertificate: "tls.crt",
+			PrivateKey:        "tls.key",
+		},
+	},
+}
+
+var httpServer = istiov1alpha3.Server{
 	Hosts: []string{"*"},
-	Port: v1alpha3.Port{
+	Port: &istiov1alpha3.Port{
 		Name:     httpServerPortName,
 		Number:   80,
-		Protocol: v1alpha3.ProtocolHTTP,
+		Protocol: "HTTP",
 	},
 }
 
 var gatewayWithPlaceholderServer = v1alpha3.Gateway{
-	Spec: v1alpha3.GatewaySpec{
-		Servers: []v1alpha3.Server{placeholderServer},
+	Spec: istiov1alpha3.Gateway{
+		Servers: []*istiov1alpha3.Server{&placeholderServer},
 	},
 }
 
-var clusterIngress = v1alpha1.ClusterIngress{
+var gatewayWithDefaultWildcardTLSServer = v1alpha3.Gateway{
+	Spec: istiov1alpha3.Gateway{
+		Servers: []*istiov1alpha3.Server{{
+			Hosts: []string{"*"},
+			Port: &istiov1alpha3.Port{
+				Name:     "https",
+				Number:   443,
+				Protocol: "HTTPS",
+			},
+			Tls: &istiov1alpha3.Server_TLSOptions{
+				Mode: istiov1alpha3.Server_TLSOptions_SIMPLE,
+			}},
+		},
+	},
+}
+
+var gatewayWithModifiedWildcardTLSServer = v1alpha3.Gateway{
+	Spec: istiov1alpha3.Gateway{
+		Servers: []*istiov1alpha3.Server{&modifiedDefaultTLSServer},
+	},
+}
+
+var modifiedDefaultTLSServer = istiov1alpha3.Server{
+	Hosts: []string{"added.by.user.example.com"},
+	Port: &istiov1alpha3.Port{
+		Name:     "https",
+		Number:   443,
+		Protocol: "HTTPS",
+	},
+	Tls: &istiov1alpha3.Server_TLSOptions{
+		Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
+		ServerCertificate: "tls.crt",
+		PrivateKey:        "tls.key",
+	},
+}
+
+var ingressSpec = v1alpha1.IngressSpec{
+	Rules: []v1alpha1.IngressRule{{
+		Hosts: []string{"host1.example.com"},
+	}},
+	TLS: []v1alpha1.IngressTLS{{
+		Hosts:             []string{"host1.example.com"},
+		SecretName:        "secret0",
+		SecretNamespace:   system.Namespace(),
+		ServerCertificate: "tls.crt",
+		PrivateKey:        "tls.key",
+	}},
+}
+
+var ingressResource = v1alpha1.Ingress{
 	ObjectMeta: metav1.ObjectMeta{
-		Name: "clusteringress",
+		Name:      "ingress",
+		Namespace: "test-ns",
 	},
-	Spec: v1alpha1.IngressSpec{
-		Rules: []v1alpha1.IngressRule{{
-			Hosts: []string{"host1.example.com"},
-		}},
-		TLS: []v1alpha1.IngressTLS{{
-			Hosts:             []string{"host1.example.com"},
-			SecretName:        "secret0",
-			SecretNamespace:   system.Namespace(),
-			ServerCertificate: "tls.crt",
-			PrivateKey:        "tls.key",
-		}},
-	},
+	Spec: ingressSpec,
 }
 
 func TestGetServers(t *testing.T) {
-	servers := GetServers(&gateway, &clusterIngress)
-	expected := []v1alpha3.Server{{
+	servers := GetServers(&gateway, &ingressResource)
+	expected := []*istiov1alpha3.Server{{
 		Hosts: []string{"host1.example.com"},
-		Port: v1alpha3.Port{
-			Name:     "clusteringress:0",
+		Port: &istiov1alpha3.Port{
+			Name:     "test-ns/ingress:0",
 			Number:   443,
-			Protocol: v1alpha3.ProtocolHTTPS,
+			Protocol: "HTTPS",
 		},
-		TLS: &v1alpha3.TLSOptions{
-			Mode:              v1alpha3.TLSModeSimple,
+		Tls: &istiov1alpha3.Server_TLSOptions{
+			Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 			ServerCertificate: "tls.crt",
 			PrivateKey:        "tls.key",
 		},
@@ -142,17 +188,17 @@ func TestGetServers(t *testing.T) {
 
 func TestGetHTTPServer(t *testing.T) {
 	newGateway := gateway
-	newGateway.Spec.Servers = append(newGateway.Spec.Servers, httpServer)
+	newGateway.Spec.Servers = append(newGateway.Spec.Servers, &httpServer)
 	server := GetHTTPServer(&newGateway)
-	expected := v1alpha3.Server{
+	expected := &istiov1alpha3.Server{
 		Hosts: []string{"*"},
-		Port: v1alpha3.Port{
+		Port: &istiov1alpha3.Port{
 			Name:     httpServerPortName,
 			Number:   80,
-			Protocol: v1alpha3.ProtocolHTTP,
+			Protocol: "HTTP",
 		},
 	}
-	if diff := cmp.Diff(expected, *server); diff != "" {
+	if diff := cmp.Diff(expected, server); diff != "" {
 		t.Errorf("Unexpected server (-want +got): %v", diff)
 	}
 }
@@ -160,46 +206,66 @@ func TestGetHTTPServer(t *testing.T) {
 func TestMakeTLSServers(t *testing.T) {
 	cases := []struct {
 		name                    string
-		ci                      *v1alpha1.ClusterIngress
+		ci                      *v1alpha1.Ingress
 		gatewayServiceNamespace string
 		originSecrets           map[string]*corev1.Secret
-		expected                []v1alpha3.Server
+		expected                []*istiov1alpha3.Server
 		wantErr                 bool
 	}{{
 		name: "secret namespace is the different from the gateway service namespace",
-		ci:   &clusterIngress,
+		ci:   &ingressResource,
 		// gateway service namespace is "istio-system", while the secret namespace is system.Namespace()("knative-testing").
 		gatewayServiceNamespace: "istio-system",
 		originSecrets:           originSecrets,
-		expected: []v1alpha3.Server{{
+		expected: []*istiov1alpha3.Server{{
 			Hosts: []string{"host1.example.com"},
-			Port: v1alpha3.Port{
-				Name:     "clusteringress:0",
+			Port: &istiov1alpha3.Port{
+				Name:     "test-ns/ingress:0",
 				Number:   443,
-				Protocol: v1alpha3.ProtocolHTTPS,
+				Protocol: "HTTPS",
 			},
-			TLS: &v1alpha3.TLSOptions{
-				Mode:              v1alpha3.TLSModeSimple,
+			Tls: &istiov1alpha3.Server_TLSOptions{
+				Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 				ServerCertificate: "tls.crt",
 				PrivateKey:        "tls.key",
-				CredentialName:    targetSecret(&secret, &clusterIngress),
+				CredentialName:    targetSecret(&secret, &ingressResource),
 			},
 		}},
 	}, {
 		name: "secret namespace is the same as the gateway service namespace",
-		ci:   &clusterIngress,
+		ci:   &ingressResource,
 		// gateway service namespace and the secret namespace are both in system.Namespace().
 		gatewayServiceNamespace: system.Namespace(),
 		originSecrets:           originSecrets,
-		expected: []v1alpha3.Server{{
+		expected: []*istiov1alpha3.Server{{
 			Hosts: []string{"host1.example.com"},
-			Port: v1alpha3.Port{
-				Name:     "clusteringress:0",
+			Port: &istiov1alpha3.Port{
+				Name:     "test-ns/ingress:0",
 				Number:   443,
-				Protocol: v1alpha3.ProtocolHTTPS,
+				Protocol: "HTTPS",
 			},
-			TLS: &v1alpha3.TLSOptions{
-				Mode:              v1alpha3.TLSModeSimple,
+			Tls: &istiov1alpha3.Server_TLSOptions{
+				Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
+				ServerCertificate: "tls.crt",
+				PrivateKey:        "tls.key",
+				CredentialName:    "secret0",
+			},
+		}},
+	}, {
+		name:                    "port name is created with ingress namespace-name",
+		ci:                      &ingressResource,
+		gatewayServiceNamespace: system.Namespace(),
+		originSecrets:           originSecrets,
+		expected: []*istiov1alpha3.Server{{
+			Hosts: []string{"host1.example.com"},
+			Port: &istiov1alpha3.Port{
+				// port name is created with <namespace>/<name>
+				Name:     "test-ns/ingress:0",
+				Number:   443,
+				Protocol: "HTTPS",
+			},
+			Tls: &istiov1alpha3.Server_TLSOptions{
+				Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 				ServerCertificate: "tls.crt",
 				PrivateKey:        "tls.key",
 				CredentialName:    "secret0",
@@ -207,7 +273,7 @@ func TestMakeTLSServers(t *testing.T) {
 		}},
 	}, {
 		name:                    "error to make servers because of incorrect originSecrets",
-		ci:                      &clusterIngress,
+		ci:                      &ingressResource,
 		gatewayServiceNamespace: "istio-system",
 		originSecrets:           map[string]*corev1.Secret{},
 		wantErr:                 true,
@@ -229,7 +295,7 @@ func TestMakeHTTPServer(t *testing.T) {
 	cases := []struct {
 		name         string
 		httpProtocol network.HTTPProtocol
-		expected     *v1alpha3.Server
+		expected     *istiov1alpha3.Server
 	}{{
 		name:         "nil HTTP Server",
 		httpProtocol: network.HTTPDisabled,
@@ -237,9 +303,9 @@ func TestMakeHTTPServer(t *testing.T) {
 	}, {
 		name:         "HTTP server",
 		httpProtocol: network.HTTPEnabled,
-		expected: &v1alpha3.Server{
+		expected: &istiov1alpha3.Server{
 			Hosts: []string{"*"},
-			Port: v1alpha3.Port{
+			Port: &istiov1alpha3.Port{
 				Name:     httpServerPortName,
 				Number:   80,
 				Protocol: "HTTP",
@@ -248,15 +314,15 @@ func TestMakeHTTPServer(t *testing.T) {
 	}, {
 		name:         "Redirect HTTP server",
 		httpProtocol: network.HTTPRedirected,
-		expected: &v1alpha3.Server{
+		expected: &istiov1alpha3.Server{
 			Hosts: []string{"*"},
-			Port: v1alpha3.Port{
+			Port: &istiov1alpha3.Port{
 				Name:     httpServerPortName,
 				Number:   80,
 				Protocol: "HTTP",
 			},
-			TLS: &v1alpha3.TLSOptions{
-				HTTPSRedirect: true,
+			Tls: &istiov1alpha3.Server_TLSOptions{
+				HttpsRedirect: true,
 			},
 		},
 	}}
@@ -273,63 +339,63 @@ func TestMakeHTTPServer(t *testing.T) {
 func TestUpdateGateway(t *testing.T) {
 	cases := []struct {
 		name            string
-		existingServers []v1alpha3.Server
-		newServers      []v1alpha3.Server
+		existingServers []*istiov1alpha3.Server
+		newServers      []*istiov1alpha3.Server
 		original        v1alpha3.Gateway
 		expected        v1alpha3.Gateway
 	}{{
 		name: "Update Gateway servers.",
-		existingServers: []v1alpha3.Server{{
+		existingServers: []*istiov1alpha3.Server{{
 			Hosts: []string{"host1.example.com"},
-			Port: v1alpha3.Port{
-				Name:     "clusteringress:0",
+			Port: &istiov1alpha3.Port{
+				Name:     "test-ns/ingress:0",
 				Number:   443,
-				Protocol: v1alpha3.ProtocolHTTPS,
+				Protocol: "HTTPS",
 			},
-			TLS: &v1alpha3.TLSOptions{
-				Mode:              v1alpha3.TLSModeSimple,
+			Tls: &istiov1alpha3.Server_TLSOptions{
+				Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 				ServerCertificate: "tls.crt",
 				PrivateKey:        "tls.key",
 			},
 		}},
-		newServers: []v1alpha3.Server{{
+		newServers: []*istiov1alpha3.Server{{
 			Hosts: []string{"host-new.example.com"},
-			Port: v1alpha3.Port{
-				Name:     "clusteringress:0",
+			Port: &istiov1alpha3.Port{
+				Name:     "test-ns/ingress:0",
 				Number:   443,
-				Protocol: v1alpha3.ProtocolHTTPS,
+				Protocol: "HTTPS",
 			},
-			TLS: &v1alpha3.TLSOptions{
-				Mode:              v1alpha3.TLSModeSimple,
+			Tls: &istiov1alpha3.Server_TLSOptions{
+				Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 				ServerCertificate: "tls.crt",
 				PrivateKey:        "tls.key",
 			},
 		}},
 		original: gateway,
 		expected: v1alpha3.Gateway{
-			Spec: v1alpha3.GatewaySpec{
-				Servers: []v1alpha3.Server{{
+			Spec: istiov1alpha3.Gateway{
+				Servers: []*istiov1alpha3.Server{{
 					// The host name was updated to the one in "newServers".
 					Hosts: []string{"host-new.example.com"},
-					Port: v1alpha3.Port{
-						Name:     "clusteringress:0",
+					Port: &istiov1alpha3.Port{
+						Name:     "test-ns/ingress:0",
 						Number:   443,
-						Protocol: v1alpha3.ProtocolHTTPS,
+						Protocol: "HTTPS",
 					},
-					TLS: &v1alpha3.TLSOptions{
-						Mode:              v1alpha3.TLSModeSimple,
+					Tls: &istiov1alpha3.Server_TLSOptions{
+						Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 						ServerCertificate: "tls.crt",
 						PrivateKey:        "tls.key",
 					},
 				}, {
 					Hosts: []string{"host2.example.com"},
-					Port: v1alpha3.Port{
-						Name:     "non-clusteringress:0",
+					Port: &istiov1alpha3.Port{
+						Name:     "test-ns/non-ingress:0",
 						Number:   443,
-						Protocol: v1alpha3.ProtocolHTTPS,
+						Protocol: "HTTPS",
 					},
-					TLS: &v1alpha3.TLSOptions{
-						Mode:              v1alpha3.TLSModeSimple,
+					Tls: &istiov1alpha3.Server_TLSOptions{
+						Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 						ServerCertificate: "tls.crt",
 						PrivateKey:        "tls.key",
 					},
@@ -338,33 +404,33 @@ func TestUpdateGateway(t *testing.T) {
 		},
 	}, {
 		name: "Delete servers from Gateway",
-		existingServers: []v1alpha3.Server{{
+		existingServers: []*istiov1alpha3.Server{{
 			Hosts: []string{"host1.example.com"},
-			Port: v1alpha3.Port{
-				Name:     "clusteringress:0",
+			Port: &istiov1alpha3.Port{
+				Name:     "test-ns/ingress:0",
 				Number:   443,
-				Protocol: v1alpha3.ProtocolHTTPS,
+				Protocol: "HTTPS",
 			},
-			TLS: &v1alpha3.TLSOptions{
-				Mode:              v1alpha3.TLSModeSimple,
+			Tls: &istiov1alpha3.Server_TLSOptions{
+				Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 				ServerCertificate: "tls.crt",
 				PrivateKey:        "tls.key",
 			},
 		}},
-		newServers: []v1alpha3.Server{},
+		newServers: []*istiov1alpha3.Server{},
 		original:   gateway,
 		expected: v1alpha3.Gateway{
-			Spec: v1alpha3.GatewaySpec{
+			Spec: istiov1alpha3.Gateway{
 				// Only one server is left. The other one is deleted.
-				Servers: []v1alpha3.Server{{
+				Servers: []*istiov1alpha3.Server{{
 					Hosts: []string{"host2.example.com"},
-					Port: v1alpha3.Port{
-						Name:     "non-clusteringress:0",
+					Port: &istiov1alpha3.Port{
+						Name:     "test-ns/non-ingress:0",
 						Number:   443,
-						Protocol: v1alpha3.ProtocolHTTPS,
+						Protocol: "HTTPS",
 					},
-					TLS: &v1alpha3.TLSOptions{
-						Mode:              v1alpha3.TLSModeSimple,
+					Tls: &istiov1alpha3.Server_TLSOptions{
+						Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 						ServerCertificate: "tls.crt",
 						PrivateKey:        "tls.key",
 					},
@@ -375,46 +441,46 @@ func TestUpdateGateway(t *testing.T) {
 		name: "Delete servers from Gateway and no real servers are left",
 
 		// All of the servers in the original gateway will be deleted.
-		existingServers: []v1alpha3.Server{{
+		existingServers: []*istiov1alpha3.Server{{
 			Hosts: []string{"host1.example.com"},
-			Port: v1alpha3.Port{
-				Name:     "clusteringress:0",
+			Port: &istiov1alpha3.Port{
+				Name:     "test-ns/ingress:0",
 				Number:   443,
-				Protocol: v1alpha3.ProtocolHTTPS,
+				Protocol: "HTTPS",
 			},
-			TLS: &v1alpha3.TLSOptions{
-				Mode:              v1alpha3.TLSModeSimple,
+			Tls: &istiov1alpha3.Server_TLSOptions{
+				Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 				ServerCertificate: "tls.crt",
 				PrivateKey:        "tls.key",
 			},
 		}, {
 			Hosts: []string{"host2.example.com"},
-			Port: v1alpha3.Port{
-				Name:     "non-clusteringress:0",
+			Port: &istiov1alpha3.Port{
+				Name:     "test-ns/non-ingress:0",
 				Number:   443,
-				Protocol: v1alpha3.ProtocolHTTPS,
+				Protocol: "HTTPS",
 			},
-			TLS: &v1alpha3.TLSOptions{
-				Mode:              v1alpha3.TLSModeSimple,
+			Tls: &istiov1alpha3.Server_TLSOptions{
+				Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 				ServerCertificate: "tls.crt",
 				PrivateKey:        "tls.key",
 			},
 		}},
-		newServers: []v1alpha3.Server{},
+		newServers: []*istiov1alpha3.Server{},
 		original:   gateway,
 		expected:   gatewayWithPlaceholderServer,
 	}, {
 		name:            "Add servers to the gateway with only placeholder server",
-		existingServers: []v1alpha3.Server{},
-		newServers: []v1alpha3.Server{{
+		existingServers: []*istiov1alpha3.Server{},
+		newServers: []*istiov1alpha3.Server{{
 			Hosts: []string{"host1.example.com"},
-			Port: v1alpha3.Port{
-				Name:     "clusteringress:0",
+			Port: &istiov1alpha3.Port{
+				Name:     "test-ns/ingress:0",
 				Number:   443,
-				Protocol: v1alpha3.ProtocolHTTPS,
+				Protocol: "HTTPS",
 			},
-			TLS: &v1alpha3.TLSOptions{
-				Mode:              v1alpha3.TLSModeSimple,
+			Tls: &istiov1alpha3.Server_TLSOptions{
+				Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 				ServerCertificate: "tls.crt",
 				PrivateKey:        "tls.key",
 			},
@@ -422,20 +488,64 @@ func TestUpdateGateway(t *testing.T) {
 		original: gatewayWithPlaceholderServer,
 		// The placeholder server should be deleted.
 		expected: v1alpha3.Gateway{
-			Spec: v1alpha3.GatewaySpec{
-				Servers: []v1alpha3.Server{{
+			Spec: istiov1alpha3.Gateway{
+				Servers: []*istiov1alpha3.Server{{
 					Hosts: []string{"host1.example.com"},
-					Port: v1alpha3.Port{
-						Name:     "clusteringress:0",
+					Port: &istiov1alpha3.Port{
+						Name:     "test-ns/ingress:0",
 						Number:   443,
-						Protocol: v1alpha3.ProtocolHTTPS,
+						Protocol: "HTTPS",
 					},
-					TLS: &v1alpha3.TLSOptions{
-						Mode:              v1alpha3.TLSModeSimple,
+					Tls: &istiov1alpha3.Server_TLSOptions{
+						Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 						ServerCertificate: "tls.crt",
 						PrivateKey:        "tls.key",
 					},
 				}},
+			},
+		},
+	}, {
+		name:            "Delete wildcard servers from gateway",
+		existingServers: []*istiov1alpha3.Server{},
+		newServers:      servers,
+		original:        gatewayWithDefaultWildcardTLSServer,
+		// The wildcard server should be deleted.
+		expected: gateway,
+	}, {
+		name:            "Do not delete modified wildcard servers from gateway",
+		existingServers: []*istiov1alpha3.Server{},
+		newServers: []*istiov1alpha3.Server{{
+			Hosts: []string{"host1.example.com"},
+			Port: &istiov1alpha3.Port{
+				Name:     "clusteringress:0",
+				Number:   443,
+				Protocol: "HTTPS",
+			},
+			Tls: &istiov1alpha3.Server_TLSOptions{
+				Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
+				ServerCertificate: "tls.crt",
+				PrivateKey:        "tls.key",
+			},
+		}},
+		original: gatewayWithModifiedWildcardTLSServer,
+		expected: v1alpha3.Gateway{
+			Spec: istiov1alpha3.Gateway{
+				Servers: []*istiov1alpha3.Server{
+					{
+						Hosts: []string{"host1.example.com"},
+						Port: &istiov1alpha3.Port{
+							Name:     "clusteringress:0",
+							Number:   443,
+							Protocol: "HTTPS",
+						},
+						Tls: &istiov1alpha3.Server_TLSOptions{
+							Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
+							ServerCertificate: "tls.crt",
+							PrivateKey:        "tls.key",
+						},
+					},
+					&modifiedDefaultTLSServer,
+				},
 			},
 		},
 	}}
@@ -453,14 +563,14 @@ func TestUpdateGateway(t *testing.T) {
 func TestMakeIngressGateways(t *testing.T) {
 	cases := []struct {
 		name           string
-		ia             v1alpha1.IngressAccessor
+		ia             *v1alpha1.Ingress
 		originSecrets  map[string]*corev1.Secret
 		gatewayService *corev1.Service
 		want           []*v1alpha3.Gateway
 		wantErr        bool
 	}{{
 		name:          "happy path: secret namespace is the different from the gateway service namespace",
-		ia:            &clusterIngress,
+		ia:            &ingressResource,
 		originSecrets: originSecrets,
 		gatewayService: &corev1.Service{
 			ObjectMeta: metav1.ObjectMeta{
@@ -473,31 +583,31 @@ func TestMakeIngressGateways(t *testing.T) {
 		},
 		want: []*v1alpha3.Gateway{{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:            fmt.Sprintf("clusteringress-%d", adler32.Checksum([]byte("istio-system/istio-ingressgateway"))),
-				Namespace:       system.Namespace(),
-				OwnerReferences: []metav1.OwnerReference{*kmeta.NewControllerRef(&clusterIngress)},
+				Name:            fmt.Sprintf("ingress-%d", adler32.Checksum([]byte("istio-system/istio-ingressgateway"))),
+				Namespace:       "test-ns",
+				OwnerReferences: []metav1.OwnerReference{*kmeta.NewControllerRef(&ingressResource)},
 				Labels: map[string]string{
-					networking.IngressLabelKey: "clusteringress",
+					networking.IngressLabelKey: "ingress",
 				},
 			},
-			Spec: v1alpha3.GatewaySpec{
+			Spec: istiov1alpha3.Gateway{
 				Selector: selector,
-				Servers: []v1alpha3.Server{{
+				Servers: []*istiov1alpha3.Server{{
 					Hosts: []string{"host1.example.com"},
-					Port: v1alpha3.Port{
-						Name:     "clusteringress:0",
+					Port: &istiov1alpha3.Port{
+						Name:     "test-ns/ingress:0",
 						Number:   443,
-						Protocol: v1alpha3.ProtocolHTTPS,
+						Protocol: "HTTPS",
 					},
-					TLS: &v1alpha3.TLSOptions{
-						Mode:              v1alpha3.TLSModeSimple,
+					Tls: &istiov1alpha3.Server_TLSOptions{
+						Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 						ServerCertificate: "tls.crt",
 						PrivateKey:        "tls.key",
-						CredentialName:    targetSecret(&secret, &clusterIngress),
+						CredentialName:    targetSecret(&secret, &ingressResource),
 					},
 				}, {
 					Hosts: []string{"host1.example.com"},
-					Port: v1alpha3.Port{
+					Port: &istiov1alpha3.Port{
 						Name:     httpServerPortName,
 						Number:   80,
 						Protocol: "HTTP",
@@ -507,7 +617,7 @@ func TestMakeIngressGateways(t *testing.T) {
 		}},
 	}, {
 		name:          "happy path: secret namespace is the same as the gateway service namespace",
-		ia:            &clusterIngress,
+		ia:            &ingressResource,
 		originSecrets: originSecrets,
 		// The namespace of gateway service is the same as the secrets.
 		gatewayService: &corev1.Service{
@@ -521,31 +631,31 @@ func TestMakeIngressGateways(t *testing.T) {
 		},
 		want: []*v1alpha3.Gateway{{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:            fmt.Sprintf("clusteringress-%d", adler32.Checksum([]byte(system.Namespace()+"/istio-ingressgateway"))),
-				Namespace:       system.Namespace(),
-				OwnerReferences: []metav1.OwnerReference{*kmeta.NewControllerRef(&clusterIngress)},
+				Name:            fmt.Sprintf("ingress-%d", adler32.Checksum([]byte(system.Namespace()+"/istio-ingressgateway"))),
+				Namespace:       "test-ns",
+				OwnerReferences: []metav1.OwnerReference{*kmeta.NewControllerRef(&ingressResource)},
 				Labels: map[string]string{
-					networking.IngressLabelKey: "clusteringress",
+					networking.IngressLabelKey: "ingress",
 				},
 			},
-			Spec: v1alpha3.GatewaySpec{
+			Spec: istiov1alpha3.Gateway{
 				Selector: selector,
-				Servers: []v1alpha3.Server{{
+				Servers: []*istiov1alpha3.Server{{
 					Hosts: []string{"host1.example.com"},
-					Port: v1alpha3.Port{
-						Name:     "clusteringress:0",
+					Port: &istiov1alpha3.Port{
+						Name:     "test-ns/ingress:0",
 						Number:   443,
-						Protocol: v1alpha3.ProtocolHTTPS,
+						Protocol: "HTTPS",
 					},
-					TLS: &v1alpha3.TLSOptions{
-						Mode:              v1alpha3.TLSModeSimple,
+					Tls: &istiov1alpha3.Server_TLSOptions{
+						Mode:              istiov1alpha3.Server_TLSOptions_SIMPLE,
 						ServerCertificate: "tls.crt",
 						PrivateKey:        "tls.key",
 						CredentialName:    secret.Name,
 					},
 				}, {
 					Hosts: []string{"host1.example.com"},
-					Port: v1alpha3.Port{
+					Port: &istiov1alpha3.Port{
 						Name:     httpServerPortName,
 						Number:   80,
 						Protocol: "HTTP",
@@ -555,7 +665,7 @@ func TestMakeIngressGateways(t *testing.T) {
 		}},
 	}, {
 		name:          "error to make gateway because of incorrect originSecrets",
-		ia:            &clusterIngress,
+		ia:            &ingressResource,
 		originSecrets: map[string]*corev1.Secret{},
 		gatewayService: &corev1.Service{
 			ObjectMeta: metav1.ObjectMeta{
@@ -570,11 +680,13 @@ func TestMakeIngressGateways(t *testing.T) {
 	}}
 
 	for _, c := range cases {
-		svcLister := serviceLister(c.gatewayService)
-		ctx := config.ToContext(context.Background(), &config.Config{
+		ctx, cancel, _ := rtesting.SetupFakeContextWithCancel(t)
+		defer cancel()
+		svcLister := serviceLister(ctx, c.gatewayService)
+		ctx = config.ToContext(context.Background(), &config.Config{
 			Istio: &config.Istio{
 				IngressGateways: []config.Gateway{{
-					Name:       "knative-ingress-gateway",
+					Name:       networking.KnativeIngressGateway,
 					ServiceURL: fmt.Sprintf("%s.%s.svc.cluster.local", c.gatewayService.Name, c.gatewayService.Namespace),
 				}},
 			},
@@ -594,17 +706,16 @@ func TestMakeIngressGateways(t *testing.T) {
 	}
 }
 
-func serviceLister(svcs ...*corev1.Service) corev1listers.ServiceLister {
-	fake := kubefake.NewSimpleClientset()
-	informer := kubeinformers.NewSharedInformerFactory(fake, 0)
-	services := informer.Core().V1().Services()
+func serviceLister(ctx context.Context, svcs ...*corev1.Service) corev1listers.ServiceLister {
+	fake := fakekubeclient.Get(ctx)
+	informer := fakeserviceinformer.Get(ctx)
 
 	for _, svc := range svcs {
-		fake.Core().Services(svc.Namespace).Create(svc)
-		services.Informer().GetIndexer().Add(svc)
+		fake.CoreV1().Services(svc.Namespace).Create(svc)
+		informer.Informer().GetIndexer().Add(svc)
 	}
 
-	return services.Lister()
+	return informer.Lister()
 }
 
 func TestGatewayName(t *testing.T) {

@@ -19,27 +19,24 @@ package v1beta1
 import (
 	"context"
 	"fmt"
-	"testing"
 
-	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	"knative.dev/pkg/test/logging"
+	v1 "knative.dev/serving/pkg/apis/serving/v1"
 	"knative.dev/serving/pkg/apis/serving/v1beta1"
 
-	// 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	// 	"knative.dev/pkg/ptr"
-	ptest "knative.dev/pkg/test"
+	pkgTest "knative.dev/pkg/test"
 	rtesting "knative.dev/serving/pkg/testing/v1beta1"
 	"knative.dev/serving/test"
 )
 
 // CreateConfiguration create a configuration resource in namespace with the name names.Config
 // that uses the image specified by names.Image.
-func CreateConfiguration(t *testing.T, clients *test.Clients, names test.ResourceNames, fopt ...rtesting.ConfigOption) (*v1beta1.Configuration, error) {
+func CreateConfiguration(t pkgTest.T, clients *test.Clients, names test.ResourceNames, fopt ...rtesting.ConfigOption) (*v1beta1.Configuration, error) {
 	config := Configuration(names, fopt...)
 	LogResourceObject(t, ResourceObjects{Config: config})
 	return clients.ServingBetaClient.Configs.Create(config)
@@ -47,13 +44,13 @@ func CreateConfiguration(t *testing.T, clients *test.Clients, names test.Resourc
 
 // PatchConfig patches the existing configuration passed in with the applied mutations.
 // Returns the latest configuration object
-func PatchConfig(t *testing.T, clients *test.Clients, svc *v1beta1.Configuration, fopt ...rtesting.ConfigOption) (*v1beta1.Configuration, error) {
+func PatchConfig(t pkgTest.T, clients *test.Clients, svc *v1beta1.Configuration, fopt ...rtesting.ConfigOption) (*v1beta1.Configuration, error) {
 	newSvc := svc.DeepCopy()
 	for _, opt := range fopt {
 		opt(newSvc)
 	}
 	LogResourceObject(t, ResourceObjects{Config: newSvc})
-	patchBytes, err := createPatch(svc, newSvc)
+	patchBytes, err := test.CreateBytePatch(svc, newSvc)
 	if err != nil {
 		return nil, err
 	}
@@ -84,10 +81,10 @@ func WaitForConfigLatestRevision(clients *test.Clients, names test.ResourceNames
 
 // ConfigurationSpec returns the spec of a configuration to be used throughout different
 // CRD helpers.
-func ConfigurationSpec(imagePath string) *v1beta1.ConfigurationSpec {
-	return &v1beta1.ConfigurationSpec{
-		Template: v1beta1.RevisionTemplateSpec{
-			Spec: v1beta1.RevisionSpec{
+func ConfigurationSpec(imagePath string) *v1.ConfigurationSpec {
+	return &v1.ConfigurationSpec{
+		Template: v1.RevisionTemplateSpec{
+			Spec: v1.RevisionSpec{
 				PodSpec: corev1.PodSpec{
 					Containers: []corev1.Container{{
 						Image: imagePath,
@@ -105,7 +102,7 @@ func Configuration(names test.ResourceNames, fopt ...rtesting.ConfigOption) *v1b
 		ObjectMeta: metav1.ObjectMeta{
 			Name: names.Config,
 		},
-		Spec: *ConfigurationSpec(ptest.ImagePath(names.Image)),
+		Spec: *ConfigurationSpec(pkgTest.ImagePath(names.Image)),
 	}
 
 	for _, opt := range fopt {
@@ -116,15 +113,15 @@ func Configuration(names test.ResourceNames, fopt ...rtesting.ConfigOption) *v1b
 }
 
 // WaitForConfigurationState polls the status of the Configuration called name
-// from client every interval until inState returns `true` indicating it
-// is done, returns an error or timeout. desc will be used to name the metric
+// from client every PollInterval until inState returns `true` indicating it
+// is done, returns an error or PollTimeout. desc will be used to name the metric
 // that is emitted to track how long it took for name to get into the state checked by inState.
 func WaitForConfigurationState(client *test.ServingBetaClients, name string, inState func(c *v1beta1.Configuration) (bool, error), desc string) error {
 	span := logging.GetEmitableSpan(context.Background(), fmt.Sprintf("WaitForConfigurationState/%s/%s", name, desc))
 	defer span.End()
 
 	var lastState *v1beta1.Configuration
-	waitErr := wait.PollImmediate(interval, timeout, func() (bool, error) {
+	waitErr := wait.PollImmediate(test.PollInterval, test.PollTimeout, func() (bool, error) {
 		var err error
 		lastState, err = client.Configs.Get(name, metav1.GetOptions{})
 		if err != nil {
@@ -134,7 +131,7 @@ func WaitForConfigurationState(client *test.ServingBetaClients, name string, inS
 	})
 
 	if waitErr != nil {
-		return errors.Wrapf(waitErr, "configuration %q is not in desired state, got: %+v", name, lastState)
+		return fmt.Errorf("configuration %q is not in desired state, got: %+v: %w", name, lastState, waitErr)
 	}
 	return nil
 }
@@ -155,17 +152,8 @@ func CheckConfigurationState(client *test.ServingBetaClients, name string, inSta
 	return nil
 }
 
-// // ConfigurationHasCreatedRevision returns whether the Configuration has created a Revision.
-// func ConfigurationHasCreatedRevision(c *v1beta1.Configuration) (bool, error) {
-// 	return c.Status.LatestCreatedRevisionName != "", nil
-// }
-
-// // IsConfigRevisionCreationFailed will check the status conditions of the
-// // configuration and return true if the configuration's revision failed to
-// // create.
-// func IsConfigRevisionCreationFailed(c *v1beta1.Configuration) (bool, error) {
-// 	if cond := c.Status.GetCondition(v1beta1.ConfigurationConditionReady); cond != nil {
-// 		return cond.Status == corev1.ConditionFalse && cond.Reason == "RevisionFailed", nil
-// 	}
-// 	return false, nil
-// }
+// IsConfigurationReady will check the status conditions of the config and return true if the config is
+// ready. This means it has at least created one revision and that has become ready.
+func IsConfigurationReady(c *v1beta1.Configuration) (bool, error) {
+	return c.Generation == c.Status.ObservedGeneration && c.Status.IsReady(), nil
+}

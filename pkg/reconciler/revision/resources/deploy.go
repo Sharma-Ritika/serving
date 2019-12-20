@@ -17,22 +17,22 @@ limitations under the License.
 package resources
 
 import (
+	"fmt"
 	"strconv"
 
 	"knative.dev/pkg/kmeta"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/ptr"
+	tracingconfig "knative.dev/pkg/tracing/config"
 	"knative.dev/serving/pkg/apis/networking"
 	"knative.dev/serving/pkg/apis/serving"
 	"knative.dev/serving/pkg/apis/serving/v1alpha1"
-	"knative.dev/serving/pkg/autoscaler"
 	"knative.dev/serving/pkg/deployment"
 	"knative.dev/serving/pkg/metrics"
 	"knative.dev/serving/pkg/network"
 	"knative.dev/serving/pkg/queue"
 	"knative.dev/serving/pkg/reconciler/revision/resources/names"
 	"knative.dev/serving/pkg/resources"
-	tracingconfig "knative.dev/serving/pkg/tracing/config"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -108,7 +108,13 @@ func rewriteUserProbe(p *corev1.Probe, userPort int) {
 	}
 }
 
-func makePodSpec(rev *v1alpha1.Revision, loggingConfig *logging.Config, tracingConfig *tracingconfig.Config, observabilityConfig *metrics.ObservabilityConfig, autoscalerConfig *autoscaler.Config, deploymentConfig *deployment.Config) *corev1.PodSpec {
+func makePodSpec(rev *v1alpha1.Revision, loggingConfig *logging.Config, tracingConfig *tracingconfig.Config, observabilityConfig *metrics.ObservabilityConfig, deploymentConfig *deployment.Config) (*corev1.PodSpec, error) {
+	queueContainer, err := makeQueueContainer(rev, loggingConfig, tracingConfig, observabilityConfig, deploymentConfig)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to create queue-proxy container: %w", err)
+	}
+
 	userContainer := rev.Spec.GetContainer().DeepCopy()
 	// Adding or removing an overwritten corev1.Container field here? Don't forget to
 	// update the fieldmasks / validations in pkg/apis/serving
@@ -149,11 +155,12 @@ func makePodSpec(rev *v1alpha1.Revision, loggingConfig *logging.Config, tracingC
 	podSpec := &corev1.PodSpec{
 		Containers: []corev1.Container{
 			*userContainer,
-			*makeQueueContainer(rev, loggingConfig, tracingConfig, observabilityConfig, autoscalerConfig, deploymentConfig),
+			*queueContainer,
 		},
 		Volumes:                       append([]corev1.Volume{varLogVolume}, rev.Spec.Volumes...),
 		ServiceAccountName:            rev.Spec.ServiceAccountName,
 		TerminationGracePeriodSeconds: rev.Spec.TimeoutSeconds,
+		ImagePullSecrets:              rev.Spec.ImagePullSecrets,
 	}
 
 	// Add the Knative internal volume only if /var/log collection is enabled
@@ -161,7 +168,7 @@ func makePodSpec(rev *v1alpha1.Revision, loggingConfig *logging.Config, tracingC
 		podSpec.Volumes = append(podSpec.Volumes, internalVolume)
 	}
 
-	return podSpec
+	return podSpec, nil
 }
 
 func getUserPort(rev *v1alpha1.Revision) int32 {
@@ -170,8 +177,6 @@ func getUserPort(rev *v1alpha1.Revision) int32 {
 	if len(ports) > 0 && ports[0].ContainerPort != 0 {
 		return ports[0].ContainerPort
 	}
-
-	//TODO(#2258): Use container EXPOSE metadata from image before falling back to default value
 
 	return v1alpha1.DefaultUserPort
 }
@@ -193,17 +198,12 @@ func buildUserPortEnv(userPort string) corev1.EnvVar {
 // MakeDeployment constructs a K8s Deployment resource from a revision.
 func MakeDeployment(rev *v1alpha1.Revision,
 	loggingConfig *logging.Config, tracingConfig *tracingconfig.Config, networkConfig *network.Config, observabilityConfig *metrics.ObservabilityConfig,
-	autoscalerConfig *autoscaler.Config, deploymentConfig *deployment.Config) *appsv1.Deployment {
+	deploymentConfig *deployment.Config) (*appsv1.Deployment, error) {
 
 	podTemplateAnnotations := resources.FilterMap(rev.GetAnnotations(), func(k string) bool {
 		return k == serving.RevisionLastPinnedAnnotationKey
 	})
 
-	// TODO(nghia): Remove the need for this
-	// Only force-set the inject annotation if the revision does not state otherwise.
-	if _, ok := podTemplateAnnotations[sidecarIstioInjectAnnotation]; !ok {
-		podTemplateAnnotations[sidecarIstioInjectAnnotation] = "true"
-	}
 	// TODO(mattmoor): Once we have a mechanism for decorating arbitrary deployments (and opting
 	// out via annotation) we should explicitly disable that here to avoid redundant Image
 	// resources.
@@ -220,6 +220,10 @@ func MakeDeployment(rev *v1alpha1.Revision,
 		if len(networkConfig.IstioOutboundIPRanges) > 0 {
 			podTemplateAnnotations[IstioOutboundIPRangeAnnotation] = networkConfig.IstioOutboundIPRanges
 		}
+	}
+	podSpec, err := makePodSpec(rev, loggingConfig, tracingConfig, observabilityConfig, deploymentConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create PodSpec: %w", err)
 	}
 
 	return &appsv1.Deployment{
@@ -242,8 +246,8 @@ func MakeDeployment(rev *v1alpha1.Revision,
 					Labels:      makeLabels(rev),
 					Annotations: podTemplateAnnotations,
 				},
-				Spec: *makePodSpec(rev, loggingConfig, tracingConfig, observabilityConfig, autoscalerConfig, deploymentConfig),
+				Spec: *podSpec,
 			},
 		},
-	}
+	}, nil
 }

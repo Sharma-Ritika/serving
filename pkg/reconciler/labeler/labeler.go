@@ -19,8 +19,8 @@ package labeler
 import (
 	"context"
 
+	"go.uber.org/zap"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/logging"
@@ -45,21 +45,19 @@ var _ controller.Reconciler = (*Reconciler)(nil)
 // converge the two. In this case, it attempts to label all Configurations
 // with the Routes that direct traffic to their Revisions.
 func (c *Reconciler) Reconcile(ctx context.Context, key string) error {
-	// Convert the namespace/name string into a distinct namespace and name
+	logger := logging.FromContext(ctx)
+
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
-		c.Logger.Errorf("invalid resource key: %s", key)
+		logger.Errorw("Invalid resource key", zap.Error(err))
 		return nil
 	}
-	logger := logging.FromContext(ctx)
 
 	// Get the Route resource with this namespace/name
 	route, err := c.routeLister.Routes(namespace).Get(name)
 	if apierrs.IsNotFound(err) {
 		logger.Infof("Clearing labels for deleted Route: %q", key)
-		return c.deleteLabelForOutsideOfGivenConfigurations(
-			ctx, namespace, name, sets.NewString(),
-		)
+		return c.clearLabels(ctx, namespace, name)
 	} else if err != nil {
 		return err
 	}

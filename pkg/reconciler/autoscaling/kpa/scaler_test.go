@@ -29,10 +29,11 @@ import (
 	// These are the fake informers we want setup.
 	fakedynamicclient "knative.dev/pkg/injection/clients/dynamicclient/fake"
 	fakeservingclient "knative.dev/serving/pkg/client/injection/client/fake"
+	podscalable "knative.dev/serving/pkg/client/injection/ducks/autoscaling/v1alpha1/podscalable/fake"
 
 	"knative.dev/pkg/apis"
 	"knative.dev/pkg/apis/duck"
-	logtesting "knative.dev/pkg/logging/testing"
+	"knative.dev/pkg/network"
 	_ "knative.dev/pkg/system/testing"
 	"knative.dev/serving/pkg/activator"
 	"knative.dev/serving/pkg/apis/autoscaling"
@@ -41,11 +42,9 @@ import (
 	"knative.dev/serving/pkg/apis/serving"
 	"knative.dev/serving/pkg/apis/serving/v1alpha1"
 	clientset "knative.dev/serving/pkg/client/clientset/versioned"
-	"knative.dev/serving/pkg/network"
 	"knative.dev/serving/pkg/reconciler/autoscaling/config"
 	revisionresources "knative.dev/serving/pkg/reconciler/revision/resources"
 	"knative.dev/serving/pkg/reconciler/revision/resources/names"
-	presources "knative.dev/serving/pkg/resources"
 
 	v1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,10 +62,10 @@ import (
 const (
 	testNamespace = "test-namespace"
 	testRevision  = "test-revision"
+	key           = testNamespace + "/" + testRevision
 )
 
 func TestScaler(t *testing.T) {
-	defer logtesting.ClearAll()
 	tests := []struct {
 		label               string
 		startReplicas       int
@@ -237,6 +236,7 @@ func TestScaler(t *testing.T) {
 		wantScaling:   true,
 		paMutation: func(k *pav1alpha1.PodAutoscaler) {
 			paMarkInactive(k, time.Now().Add(-gracePeriod+time.Second))
+			WithReachabilityReachable(k)
 		},
 	}, {
 		label:         "scale down to minScale after grace period",
@@ -247,6 +247,29 @@ func TestScaler(t *testing.T) {
 		wantScaling:   true,
 		paMutation: func(k *pav1alpha1.PodAutoscaler) {
 			paMarkInactive(k, time.Now().Add(-gracePeriod))
+			WithReachabilityReachable(k)
+		},
+	}, {
+		label:         "ignore minScale if unreachable",
+		startReplicas: 10,
+		scaleTo:       0,
+		minScale:      2,
+		wantReplicas:  0,
+		wantScaling:   true,
+		paMutation: func(k *pav1alpha1.PodAutoscaler) {
+			paMarkInactive(k, time.Now().Add(-gracePeriod))
+			WithReachabilityUnreachable(k) // not needed, here for clarity
+		},
+	}, {
+		label:         "observe minScale if reachability unknown",
+		startReplicas: 10,
+		scaleTo:       0,
+		minScale:      2,
+		wantReplicas:  2,
+		wantScaling:   true,
+		paMutation: func(k *pav1alpha1.PodAutoscaler) {
+			paMarkInactive(k, time.Now().Add(-gracePeriod))
+			WithReachabilityUnknown(k)
 		},
 	}, {
 		label:         "scales up",
@@ -311,7 +334,7 @@ func TestScaler(t *testing.T) {
 			revision := newRevision(t, fakeservingclient.Get(ctx), test.minScale, test.maxScale)
 			deployment := newDeployment(t, dynamicClient, names.Deployment(revision), test.startReplicas)
 			cbCount := 0
-			revisionScaler := newScaler(ctx, presources.NewPodScalableInformerFactory(ctx), func(interface{}, time.Duration) {
+			revisionScaler := newScaler(ctx, podscalable.Get(ctx), func(interface{}, time.Duration) {
 				cbCount++
 			})
 			if test.proberfunc != nil {
@@ -370,7 +393,6 @@ func TestScaler(t *testing.T) {
 }
 
 func TestDisableScaleToZero(t *testing.T) {
-	defer logtesting.ClearAll()
 	tests := []struct {
 		label         string
 		startReplicas int
@@ -423,10 +445,11 @@ func TestDisableScaleToZero(t *testing.T) {
 			deployment := newDeployment(t, dynamicClient, names.Deployment(revision), test.startReplicas)
 			revisionScaler := &scaler{
 				dynamicClient:     fakedynamicclient.Get(ctx),
-				psInformerFactory: presources.NewPodScalableInformerFactory(ctx),
+				psInformerFactory: podscalable.Get(ctx),
 			}
 			pa := newKPA(t, fakeservingclient.Get(ctx), revision)
 			paMarkActive(pa, time.Now())
+			WithReachabilityReachable(pa)
 
 			conf := defaultConfig()
 			conf.Autoscaler.EnableScaleToZero = false
@@ -599,6 +622,7 @@ func TestActivatorProbe(t *testing.T) {
 			return rsp.Result(), nil
 		},
 		wantRes: false,
+		wantErr: true,
 	}, {
 		name: "wrong body",
 		rt: func(r *http.Request) (*http.Response, error) {
@@ -607,6 +631,7 @@ func TestActivatorProbe(t *testing.T) {
 			return rsp.Result(), nil
 		},
 		wantRes: false,
+		wantErr: true,
 	}, {
 		name: "all wrong",
 		rt: func(r *http.Request) (*http.Response, error) {
@@ -623,7 +648,7 @@ func TestActivatorProbe(t *testing.T) {
 				t.Errorf("Result = %v, want: %v", got, want)
 			}
 			if got, want := err != nil, test.wantErr; got != want {
-				t.Errorf("WantErr = %v, want: %v", got, want)
+				t.Errorf("WantErr = %v, want: %v: actual error is: %v", got, want, err)
 			}
 		})
 	}

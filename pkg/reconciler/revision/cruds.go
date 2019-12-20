@@ -18,6 +18,7 @@ package revision
 
 import (
 	"context"
+	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -34,15 +35,18 @@ import (
 func (c *Reconciler) createDeployment(ctx context.Context, rev *v1alpha1.Revision) (*appsv1.Deployment, error) {
 	cfgs := config.FromContext(ctx)
 
-	deployment := resources.MakeDeployment(
+	deployment, err := resources.MakeDeployment(
 		rev,
 		cfgs.Logging,
 		cfgs.Tracing,
 		cfgs.Network,
 		cfgs.Observability,
-		cfgs.Autoscaler,
 		cfgs.Deployment,
 	)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to make deployment: %w", err)
+	}
 
 	return c.KubeClientSet.AppsV1().Deployments(deployment.Namespace).Create(deployment)
 }
@@ -51,15 +55,18 @@ func (c *Reconciler) checkAndUpdateDeployment(ctx context.Context, rev *v1alpha1
 	logger := logging.FromContext(ctx)
 	cfgs := config.FromContext(ctx)
 
-	deployment := resources.MakeDeployment(
+	deployment, err := resources.MakeDeployment(
 		rev,
 		cfgs.Logging,
 		cfgs.Tracing,
 		cfgs.Network,
 		cfgs.Observability,
-		cfgs.Autoscaler,
 		cfgs.Deployment,
 	)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to update deployment: %w", err)
+	}
 
 	// Preserve the current scale of the Deployment.
 	deployment.Spec.Replicas = have.Spec.Replicas

@@ -19,13 +19,15 @@ package traffic
 import (
 	"context"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	"knative.dev/pkg/ptr"
 	net "knative.dev/serving/pkg/apis/networking"
 	"knative.dev/serving/pkg/apis/serving"
+	v1 "knative.dev/serving/pkg/apis/serving/v1"
 	"knative.dev/serving/pkg/apis/serving/v1alpha1"
-	"knative.dev/serving/pkg/apis/serving/v1beta1"
 	listers "knative.dev/serving/pkg/client/listers/serving/v1alpha1"
 	"knative.dev/serving/pkg/reconciler/route/domains"
 	"knative.dev/serving/pkg/reconciler/route/resources/labels"
@@ -39,7 +41,7 @@ const (
 // A RevisionTarget adds the Active/Inactive state and the transport protocol of a
 // Revision to a flattened TrafficTarget.
 type RevisionTarget struct {
-	v1beta1.TrafficTarget
+	v1.TrafficTarget
 	Active      bool
 	Protocol    net.ProtocolType
 	ServiceName string // Revision service name.
@@ -64,6 +66,10 @@ type Config struct {
 	// The referred `Configuration`s and `Revision`s.
 	Configurations map[string]*v1alpha1.Configuration
 	Revisions      map[string]*v1alpha1.Revision
+
+	// MissingTargets are references to Configuration's or Revision's
+	// that are missing
+	MissingTargets []corev1.ObjectReference
 }
 
 // BuildTrafficConfiguration consolidates and flattens the Route.Spec.Traffic to the Revision-level. It also provides a
@@ -82,13 +88,18 @@ func BuildTrafficConfiguration(configLister listers.ConfigurationLister, revList
 func (t *Config) GetRevisionTrafficTargets(ctx context.Context, r *v1alpha1.Route, clusterLocalService sets.String) ([]v1alpha1.TrafficTarget, error) {
 	results := make([]v1alpha1.TrafficTarget, len(t.revisionTargets))
 	for i, tt := range t.revisionTargets {
+		var pp *int64
+		if tt.Percent != nil {
+			pp = ptr.Int64(*tt.Percent)
+		}
+
 		// We cannot `DeepCopy` here, since tt.TrafficTarget might contain both
 		// configuration and revision.
 		results[i] = v1alpha1.TrafficTarget{
-			TrafficTarget: v1beta1.TrafficTarget{
+			TrafficTarget: v1.TrafficTarget{
 				Tag:            tt.Tag,
 				RevisionName:   tt.RevisionName,
-				Percent:        tt.Percent,
+				Percent:        pp,
 				LatestRevision: tt.LatestRevision,
 			},
 		}
@@ -128,6 +139,10 @@ type configBuilder struct {
 	configurations map[string]*v1alpha1.Configuration
 	// revisions contains all the referred Revision, keyed by their name.
 	revisions map[string]*v1alpha1.Revision
+
+	// missingTargets is a collection of targets that weren't present
+	// in our listers
+	missingTargets []corev1.ObjectReference
 
 	// TargetError are deferred until we got a complete list of all referred targets.
 	deferredTargetErr TargetError
@@ -199,6 +214,18 @@ func (t *configBuilder) addTrafficTarget(tt *v1alpha1.TrafficTarget) error {
 	} else if tt.ConfigurationName != "" {
 		err = t.addConfigurationTarget(tt)
 	}
+	if err, ok := err.(*missingTargetError); err != nil && ok {
+		apiVersion, kind := v1alpha1.SchemeGroupVersion.
+			WithKind(err.kind).
+			ToAPIVersionAndKind()
+
+		t.missingTargets = append(t.missingTargets, corev1.ObjectReference{
+			APIVersion: apiVersion,
+			Kind:       kind,
+			Name:       err.name,
+			Namespace:  t.namespace,
+		})
+	}
 	if err, ok := err.(TargetError); err != nil && ok {
 		// Defer target errors, as we still want to compile a list of
 		// all referred targets, including missing ones.
@@ -249,7 +276,6 @@ func (t *configBuilder) addRevisionTarget(tt *v1alpha1.TrafficTarget) error {
 		Protocol:      rev.GetProtocol(),
 		ServiceName:   rev.Status.ServiceName,
 	}
-	t.revisions[tt.RevisionName] = rev
 	if configName, ok := rev.Labels[serving.ConfigurationLabelKey]; ok {
 		target.TrafficTarget.ConfigurationName = configName
 		if _, err := t.getConfiguration(configName); err != nil {
@@ -279,7 +305,14 @@ func consolidate(targets RevisionTargets) RevisionTargets {
 			byName[name] = tt
 			names = append(names, name)
 		} else {
-			cur.TrafficTarget.Percent += tt.TrafficTarget.Percent
+			if tt.TrafficTarget.Percent != nil {
+				current := int64(0)
+				if cur.TrafficTarget.Percent != nil {
+					current += *cur.TrafficTarget.Percent
+				}
+				current += *tt.TrafficTarget.Percent
+				cur.TrafficTarget.Percent = ptr.Int64(current)
+			}
 			byName[name] = cur
 		}
 	}
@@ -288,7 +321,7 @@ func consolidate(targets RevisionTargets) RevisionTargets {
 		consolidated[i] = byName[name]
 	}
 	if len(consolidated) == 1 {
-		consolidated[0].TrafficTarget.Percent = 100
+		consolidated[0].TrafficTarget.Percent = ptr.Int64(100)
 	}
 	return consolidated
 }
@@ -311,5 +344,6 @@ func (t *configBuilder) build() (*Config, error) {
 		revisionTargets: t.revisionTargets,
 		Configurations:  t.configurations,
 		Revisions:       t.revisions,
+		MissingTargets:  t.missingTargets,
 	}, t.deferredTargetErr
 }

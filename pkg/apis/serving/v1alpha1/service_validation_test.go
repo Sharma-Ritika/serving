@@ -29,7 +29,8 @@ import (
 
 	"knative.dev/pkg/apis"
 	"knative.dev/pkg/ptr"
-	"knative.dev/serving/pkg/apis/serving/v1beta1"
+	"knative.dev/serving/pkg/apis/serving"
+	v1 "knative.dev/serving/pkg/apis/serving/v1"
 )
 
 const incorrectDNS1035Label = "not a DNS 1035 label: [a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')]"
@@ -51,7 +52,7 @@ func TestServiceValidation(t *testing.T) {
 					Configuration: ConfigurationSpec{
 						DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 							Spec: RevisionSpec{
-								RevisionSpec: v1beta1.RevisionSpec{
+								RevisionSpec: v1.RevisionSpec{
 									PodSpec: corev1.PodSpec{
 										Containers: []corev1.Container{{
 											Image: "hellworld",
@@ -78,7 +79,7 @@ func TestServiceValidation(t *testing.T) {
 					Configuration: ConfigurationSpec{
 						DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 							Spec: RevisionSpec{
-								RevisionSpec: v1beta1.RevisionSpec{
+								RevisionSpec: v1.RevisionSpec{
 									PodSpec: corev1.PodSpec{
 										Containers: []corev1.Container{{
 											Image: "hellworld",
@@ -128,7 +129,7 @@ func TestServiceValidation(t *testing.T) {
 					Configuration: ConfigurationSpec{
 						DeprecatedRevisionTemplate: &RevisionTemplateSpec{
 							Spec: RevisionSpec{
-								RevisionSpec: v1beta1.RevisionSpec{
+								RevisionSpec: v1.RevisionSpec{
 									PodSpec: corev1.PodSpec{
 										Containers: []corev1.Container{{
 											Image: "hellworld",
@@ -493,7 +494,7 @@ func TestServiceValidation(t *testing.T) {
 				},
 			},
 		},
-		want: apis.ErrInvalidValue(10, "spec.release.rolloutPercent"),
+		want: apis.ErrGeneric("may not set rolloutPercent for a single revision", "spec.release.rolloutPercent"),
 	}, {
 		name: "invalid name - dots",
 		s: &Service{
@@ -562,9 +563,9 @@ func TestServiceValidation(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							LatestRevision: ptr.Bool(true),
-							Percent:        100,
+							Percent:        ptr.Int64(100),
 						},
 					}},
 				},
@@ -581,7 +582,7 @@ func TestServiceValidation(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					Template: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
+							RevisionSpec: v1.RevisionSpec{
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Image: "helloworld",
@@ -593,9 +594,9 @@ func TestServiceValidation(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							RevisionName: "valid-00001",
-							Percent:      100,
+							Percent:      ptr.Int64(100),
 						},
 					}},
 				},
@@ -613,7 +614,7 @@ func TestServiceValidation(t *testing.T) {
 					Template: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
 							DeprecatedConcurrencyModel: "Multi",
-							RevisionSpec: v1beta1.RevisionSpec{
+							RevisionSpec: v1.RevisionSpec{
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Image: "helloworld",
@@ -625,9 +626,9 @@ func TestServiceValidation(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							RevisionName: "valid-00001",
-							Percent:      100,
+							Percent:      ptr.Int64(100),
 						},
 					}},
 				},
@@ -644,7 +645,7 @@ func TestServiceValidation(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					Template: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
+							RevisionSpec: v1.RevisionSpec{
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Image: "helloworld",
@@ -656,9 +657,9 @@ func TestServiceValidation(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
+						TrafficTarget: v1.TrafficTarget{
 							LatestRevision: ptr.Bool(true),
-							Percent:        100,
+							Percent:        ptr.Int64(100),
 						},
 					}},
 				},
@@ -677,7 +678,7 @@ func TestServiceValidation(t *testing.T) {
 				ConfigurationSpec: ConfigurationSpec{
 					Template: &RevisionTemplateSpec{
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
+							RevisionSpec: v1.RevisionSpec{
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Image: "hellworld",
@@ -689,8 +690,8 @@ func TestServiceValidation(t *testing.T) {
 				},
 				RouteSpec: RouteSpec{
 					Traffic: []TrafficTarget{{
-						TrafficTarget: v1beta1.TrafficTarget{
-							Percent: 100,
+						TrafficTarget: v1.TrafficTarget{
+							Percent: ptr.Int64(100),
 						},
 					}},
 				},
@@ -707,8 +708,7 @@ func TestServiceValidation(t *testing.T) {
 			if test.wc != nil {
 				ctx = test.wc(ctx)
 			}
-			got := test.s.Validate(ctx)
-			if diff := cmp.Diff(test.want.Error(), got.Error()); diff != "" {
+			if diff := cmp.Diff(test.want.Error(), test.s.Validate(ctx).Error()); diff != "" {
 				t.Errorf("Validate() (-want, +got) = %v", diff)
 			}
 		})
@@ -754,8 +754,7 @@ func TestRunLatestTypeValidation(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := test.rlt.Validate(context.Background())
-			if diff := cmp.Diff(test.want.Error(), got.Error()); diff != "" {
+			if diff := cmp.Diff(test.want.Error(), test.rlt.Validate(context.Background()).Error()); diff != "" {
 				t.Errorf("validateContainer (-want, +got) = %v", diff)
 			}
 		})
@@ -817,8 +816,7 @@ func TestPinnedTypeValidation(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := test.pt.Validate(context.Background())
-			if diff := cmp.Diff(test.want.Error(), got.Error()); diff != "" {
+			if diff := cmp.Diff(test.want.Error(), test.pt.Validate(context.Background()).Error()); diff != "" {
 				t.Errorf("validateContainer (-want, +got) = %v", diff)
 			}
 		})
@@ -996,7 +994,7 @@ func TestImmutableServiceFields(t *testing.T) {
 							Name: "byo-name-bar",
 						},
 						Spec: RevisionSpec{
-							RevisionSpec: v1beta1.RevisionSpec{
+							RevisionSpec: v1.RevisionSpec{
 								PodSpec: corev1.PodSpec{
 									Containers: []corev1.Container{{
 										Image: "helloworld:bar",
@@ -1089,7 +1087,7 @@ func TestImmutableServiceFields(t *testing.T) {
 		},
 		want: &apis.FieldError{
 			Message: "Saw the following changes without a name change (-old +new)",
-			Paths:   []string{"spec.runLatest.configuration.revisionTemplate"},
+			Paths:   []string{"spec.runLatest.configuration.revisionTemplate.metadata.name"},
 			Details: "{*v1alpha1.RevisionTemplateSpec}.Spec.DeprecatedContainer.Image:\n\t-: \"helloworld:bar\"\n\t+: \"helloworld:foo\"\n",
 		},
 	}}
@@ -1098,8 +1096,7 @@ func TestImmutableServiceFields(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			ctx = apis.WithinUpdate(ctx, test.old)
-			got := test.new.Validate(ctx)
-			if diff := cmp.Diff(test.want.Error(), got.Error()); diff != "" {
+			if diff := cmp.Diff(test.want.Error(), test.new.Validate(ctx).Error()); diff != "" {
 				t.Errorf("Validate (-want, +got) = %v", diff)
 			}
 		})
@@ -1126,7 +1123,7 @@ func TestServiceSubresourceUpdate(t *testing.T) {
 								DeprecatedContainer: &corev1.Container{
 									Image: "helloworld",
 								},
-								RevisionSpec: v1beta1.RevisionSpec{
+								RevisionSpec: v1.RevisionSpec{
 									TimeoutSeconds: ptr.Int64(config.DefaultMaxRevisionTimeoutSeconds - 1),
 								},
 							},
@@ -1151,7 +1148,7 @@ func TestServiceSubresourceUpdate(t *testing.T) {
 								DeprecatedContainer: &corev1.Container{
 									Image: "helloworld",
 								},
-								RevisionSpec: v1beta1.RevisionSpec{
+								RevisionSpec: v1.RevisionSpec{
 									TimeoutSeconds: ptr.Int64(config.DefaultMaxRevisionTimeoutSeconds + 1),
 								},
 							},
@@ -1176,7 +1173,7 @@ func TestServiceSubresourceUpdate(t *testing.T) {
 								DeprecatedContainer: &corev1.Container{
 									Image: "helloworld",
 								},
-								RevisionSpec: v1beta1.RevisionSpec{
+								RevisionSpec: v1.RevisionSpec{
 									TimeoutSeconds: ptr.Int64(config.DefaultMaxRevisionTimeoutSeconds - 1),
 								},
 							},
@@ -1201,7 +1198,7 @@ func TestServiceSubresourceUpdate(t *testing.T) {
 								DeprecatedContainer: &corev1.Container{
 									Image: "helloworld",
 								},
-								RevisionSpec: v1beta1.RevisionSpec{
+								RevisionSpec: v1.RevisionSpec{
 									TimeoutSeconds: ptr.Int64(config.DefaultMaxRevisionTimeoutSeconds + 1),
 								},
 							},
@@ -1220,8 +1217,125 @@ func TestServiceSubresourceUpdate(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			ctx = apis.WithinSubResourceUpdate(ctx, test.service, test.subresource)
-			got := test.service.Validate(ctx)
-			if diff := cmp.Diff(test.want.Error(), got.Error()); diff != "" {
+			if diff := cmp.Diff(test.want.Error(), test.service.Validate(ctx).Error()); diff != "" {
+				t.Errorf("Validate (-want, +got) = %v", diff)
+			}
+		})
+	}
+}
+
+func getServiceSpec(image string) ServiceSpec {
+	return ServiceSpec{
+		ConfigurationSpec: ConfigurationSpec{
+			Template: &RevisionTemplateSpec{
+				Spec: RevisionSpec{
+					RevisionSpec: v1.RevisionSpec{
+						PodSpec: corev1.PodSpec{Containers: []corev1.Container{{
+							Image: image,
+						}},
+						},
+						TimeoutSeconds: ptr.Int64(config.DefaultMaxRevisionTimeoutSeconds),
+					},
+				},
+			},
+		},
+		RouteSpec: RouteSpec{
+			Traffic: []TrafficTarget{{
+				TrafficTarget: v1.TrafficTarget{
+					LatestRevision: ptr.Bool(true),
+					Percent:        ptr.Int64(100)},
+			}},
+		},
+	}
+}
+
+func TestServiceAnnotationUpdate(t *testing.T) {
+	const (
+		u1 = "oveja@knative.dev"
+		u2 = "cabra@knative.dev"
+		u3 = "vaca@knative.dev"
+	)
+	tests := []struct {
+		name string
+		prev *Service
+		this *Service
+		want *apis.FieldError
+	}{{
+		name: "update creator annotation",
+		this: &Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "valid",
+				Annotations: map[string]string{
+					serving.CreatorAnnotation: u2,
+					serving.UpdaterAnnotation: u1,
+				},
+			},
+			Spec: getServiceSpec("helloworld:foo"),
+		},
+		prev: &Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "valid",
+				Annotations: map[string]string{
+					serving.CreatorAnnotation: u1,
+					serving.UpdaterAnnotation: u1,
+				},
+			},
+			Spec: getServiceSpec("helloworld:foo"),
+		},
+		want: &apis.FieldError{Message: "annotation value is immutable",
+			Paths: []string{"metadata.annotations." + serving.CreatorAnnotation}},
+	}, {
+		name: "update lastModifier without spec changes",
+		this: &Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "valid",
+				Annotations: map[string]string{
+					serving.CreatorAnnotation: u1,
+					serving.UpdaterAnnotation: u2,
+				},
+			},
+			Spec: getServiceSpec("helloworld:foo"),
+		},
+		prev: &Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "valid",
+				Annotations: map[string]string{
+					serving.CreatorAnnotation: u1,
+					serving.UpdaterAnnotation: u1,
+				},
+			},
+			Spec: getServiceSpec("helloworld:foo"),
+		},
+		want: apis.ErrInvalidValue(u2, "metadata.annotations."+serving.UpdaterAnnotation),
+	}, {
+		name: "update lastModifier with spec changes",
+		this: &Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "valid",
+				Annotations: map[string]string{
+					serving.CreatorAnnotation: u1,
+					serving.UpdaterAnnotation: u3,
+				},
+			},
+			Spec: getServiceSpec("helloworld:bar"),
+		},
+		prev: &Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "valid",
+				Annotations: map[string]string{
+					serving.CreatorAnnotation: u1,
+					serving.UpdaterAnnotation: u1,
+				},
+			},
+			Spec: getServiceSpec("helloworld:foo"),
+		},
+		want: nil,
+	}}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			ctx = apis.WithinUpdate(ctx, test.prev)
+			if diff := cmp.Diff(test.want.Error(), test.this.Validate(ctx).Error()); diff != "" {
 				t.Errorf("Validate (-want, +got) = %v", diff)
 			}
 		})

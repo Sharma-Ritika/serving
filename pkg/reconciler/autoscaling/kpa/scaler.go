@@ -22,18 +22,17 @@ import (
 	"net/http"
 	"time"
 
-	"go.uber.org/zap"
-
 	"knative.dev/pkg/apis/duck"
 	"knative.dev/pkg/injection/clients/dynamicclient"
 	"knative.dev/pkg/logging"
 
+	pkgnet "knative.dev/pkg/network"
+	"knative.dev/pkg/network/prober"
 	"knative.dev/serving/pkg/activator"
 	pav1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/apis/networking"
 	nv1a1 "knative.dev/serving/pkg/apis/networking/v1alpha1"
 	"knative.dev/serving/pkg/network"
-	"knative.dev/serving/pkg/network/prober"
 	"knative.dev/serving/pkg/reconciler/autoscaling/config"
 	aresources "knative.dev/serving/pkg/reconciler/autoscaling/resources"
 	rresources "knative.dev/serving/pkg/reconciler/revision/resources"
@@ -67,6 +66,7 @@ const (
 var probeOptions = []interface{}{
 	prober.WithHeader(network.ProbeHeaderName, activator.Name),
 	prober.ExpectsBody(activator.Name),
+	prober.ExpectsStatusCodes([]int{http.StatusOK}),
 }
 
 // for mocking in tests
@@ -91,7 +91,7 @@ type scaler struct {
 // newScaler creates a scaler.
 func newScaler(ctx context.Context, psInformerFactory duck.InformerFactory, enqueueCB func(interface{}, time.Duration)) *scaler {
 	logger := logging.FromContext(ctx)
-	transport := network.NewProberTransport()
+	transport := pkgnet.NewProberTransport()
 	ks := &scaler{
 		// Wrap it in a cache, so that we don't stamp out a new
 		// informer/lister each time.
@@ -113,7 +113,7 @@ func newScaler(ctx context.Context, psInformerFactory duck.InformerFactory, enqu
 
 // Resolves the pa to hostname:port.
 func paToProbeTarget(pa *pav1alpha1.PodAutoscaler) string {
-	svc := network.GetServiceHostname(pa.Status.ServiceName, pa.Namespace)
+	svc := pkgnet.GetServiceHostname(pa.Status.ServiceName, pa.Namespace)
 	port := networking.ServicePort(pa.Spec.ProtocolType)
 	return fmt.Sprintf("http://%s:%d/", svc, port)
 }
@@ -154,11 +154,12 @@ func (ks *scaler) handleScaleToZero(ctx context.Context, pa *pav1alpha1.PodAutos
 		return 1, true
 	}
 
+	now := time.Now()
 	logger := logging.FromContext(ctx)
 	if pa.Status.IsActivating() { // Active=Unknown
 		// If we are stuck activating for longer than our progress deadline, presume we cannot succeed and scale to 0.
-		if pa.Status.CanFailActivation(activationTimeout) {
-			logger.Infof("%s activation has timed out after %v.", pa.Name, activationTimeout)
+		if pa.Status.CanFailActivation(now, activationTimeout) {
+			logger.Infof("Activation has timed out after %v.", activationTimeout)
 			return 0, true
 		}
 		ks.enqueueCB(pa, activationTimeout)
@@ -168,7 +169,7 @@ func (ks *scaler) handleScaleToZero(ctx context.Context, pa *pav1alpha1.PodAutos
 
 		// Do not scale to 0, but return desiredScale of 0 to mark PA inactive.
 		sw := aresources.StableWindow(pa, config)
-		af := pa.Status.ActiveFor()
+		af := pa.Status.ActiveFor(now)
 		if af >= sw {
 			// We do not need to enqueue PA here, since this will
 			// make SKS reconcile and when it's done, PA will be reconciled again.
@@ -176,12 +177,12 @@ func (ks *scaler) handleScaleToZero(ctx context.Context, pa *pav1alpha1.PodAutos
 		}
 		// Otherwise, scale down to at most 1 for the remainder of the idle period and then
 		// reconcile PA again.
-		logger.Infof("%s sleeping additionally for %v before can scale to 0", sw-af)
+		logger.Infof("Sleeping additionally for %v before can scale to 0", sw-af)
 		ks.enqueueCB(pa, sw-af)
 		desiredScale = 1
 	} else { // Active=False
 		r, err := ks.activatorProbe(pa, ks.transport)
-		logger.Infof("%s probing activator = %v, err = %v", pa.Name, r, err)
+		logger.Infof("Probing activator = %v, err = %v", r, err)
 		if r {
 			// This enforces that the revision has been backed by the activator for at least
 			// ScaleToZeroGracePeriod time.
@@ -189,7 +190,7 @@ func (ks *scaler) handleScaleToZero(ctx context.Context, pa *pav1alpha1.PodAutos
 			// defensive programming.
 
 			// Most conservative check, if it passes we're good.
-			if pa.Status.CanScaleToZero(config.ScaleToZeroGracePeriod) {
+			if pa.Status.CanScaleToZero(now, config.ScaleToZeroGracePeriod) {
 				return desiredScale, true
 			}
 
@@ -213,9 +214,9 @@ func (ks *scaler) handleScaleToZero(ctx context.Context, pa *pav1alpha1.PodAutos
 		}
 
 		// Otherwise (any prober failure) start the async probe.
-		logger.Infof("%s is not yet backed by activator, cannot scale to zero", pa.Name)
+		logger.Info("PA is not yet backed by activator, cannot scale to zero")
 		if !ks.probeManager.Offer(context.Background(), paToProbeTarget(pa), pa, probePeriod, probeTimeout, probeOptions...) {
-			logger.Infof("Probe for %s is already in flight", pa.Name)
+			logger.Info("Probe for revision is already in flight")
 		}
 		return desiredScale, false
 	}
@@ -244,10 +245,9 @@ func (ks *scaler) applyScale(ctx context.Context, pa *pav1alpha1.PodAutoscaler, 
 	}
 
 	_, err = ks.dynamicClient.Resource(*gvr).Namespace(pa.Namespace).Patch(ps.Name, types.JSONPatchType,
-		patchBytes, metav1.UpdateOptions{})
+		patchBytes, metav1.PatchOptions{})
 	if err != nil {
-		logger.Errorw("Error scaling target reference "+name, zap.Error(err))
-		return desiredScale, err
+		return desiredScale, fmt.Errorf("failed to apply scale to scale target %s: %w", name, err)
 	}
 
 	logger.Debug("Successfully scaled.")
@@ -276,8 +276,7 @@ func (ks *scaler) Scale(ctx context.Context, pa *pav1alpha1.PodAutoscaler, sks *
 
 	ps, err := resources.GetScaleResource(pa.Namespace, pa.Spec.ScaleTargetRef, ks.psInformerFactory)
 	if err != nil {
-		logger.Errorw(fmt.Sprintf("Resource %q not found", pa.Name), zap.Error(err))
-		return desiredScale, err
+		return desiredScale, fmt.Errorf("failed to get scale target %v: %w", pa.Spec.ScaleTargetRef, err)
 	}
 
 	currentScale := int32(1)

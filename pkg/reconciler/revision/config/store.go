@@ -19,15 +19,15 @@ package config
 import (
 	"context"
 
+	"knative.dev/serving/pkg/apis/config"
+
 	"knative.dev/pkg/configmap"
-	pkglogging "knative.dev/pkg/logging"
+	"knative.dev/pkg/logging"
 	pkgmetrics "knative.dev/pkg/metrics"
-	"knative.dev/serving/pkg/autoscaler"
+	pkgtracing "knative.dev/pkg/tracing/config"
 	deployment "knative.dev/serving/pkg/deployment"
-	"knative.dev/serving/pkg/logging"
 	"knative.dev/serving/pkg/metrics"
 	"knative.dev/serving/pkg/network"
-	pkgtracing "knative.dev/serving/pkg/tracing/config"
 )
 
 type cfgKey struct{}
@@ -37,9 +37,9 @@ type Config struct {
 	Deployment    *deployment.Config
 	Network       *network.Config
 	Observability *metrics.ObservabilityConfig
-	Logging       *pkglogging.Config
+	Logging       *logging.Config
 	Tracing       *pkgtracing.Config
-	Autoscaler    *autoscaler.Config
+	Defaults      *config.Defaults
 }
 
 func FromContext(ctx context.Context) *Config {
@@ -65,9 +65,9 @@ func NewStore(logger configmap.Logger, onAfterStore ...func(name string, value i
 				deployment.ConfigName:      deployment.NewConfigFromConfigMap,
 				network.ConfigName:         network.NewConfigFromConfigMap,
 				pkgmetrics.ConfigMapName(): metrics.NewObservabilityConfigFromConfigMap,
-				autoscaler.ConfigName:      autoscaler.NewConfigFromConfigMap,
-				pkglogging.ConfigMapName(): logging.NewConfigFromConfigMap,
+				logging.ConfigMapName():    logging.NewConfigFromConfigMap,
 				pkgtracing.ConfigName:      pkgtracing.NewTracingConfigFromConfigMap,
+				config.DefaultsConfigName:  config.NewDefaultsConfigFromConfigMap,
 			},
 			onAfterStore...,
 		),
@@ -86,8 +86,8 @@ func (s *Store) Load() *Config {
 		Deployment:    s.UntypedLoad(deployment.ConfigName).(*deployment.Config).DeepCopy(),
 		Network:       s.UntypedLoad(network.ConfigName).(*network.Config).DeepCopy(),
 		Observability: s.UntypedLoad(pkgmetrics.ConfigMapName()).(*metrics.ObservabilityConfig).DeepCopy(),
-		Logging:       s.UntypedLoad((pkglogging.ConfigMapName())).(*pkglogging.Config).DeepCopy(),
+		Logging:       s.UntypedLoad((logging.ConfigMapName())).(*logging.Config).DeepCopy(),
 		Tracing:       s.UntypedLoad(pkgtracing.ConfigName).(*pkgtracing.Config).DeepCopy(),
-		Autoscaler:    s.UntypedLoad(autoscaler.ConfigName).(*autoscaler.Config).DeepCopy(),
+		Defaults:      s.UntypedLoad(config.DefaultsConfigName).(*config.Defaults).DeepCopy(),
 	}
 }

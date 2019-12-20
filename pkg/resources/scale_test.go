@@ -22,8 +22,9 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"knative.dev/pkg/apis/duck"
 	fakedynamicclient "knative.dev/pkg/injection/clients/dynamicclient/fake"
-	logtesting "knative.dev/pkg/logging/testing"
 	"knative.dev/serving/pkg/apis/serving"
+
+	podscalable "knative.dev/serving/pkg/client/injection/ducks/autoscaling/v1alpha1/podscalable/fake"
 
 	v1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -88,12 +89,11 @@ func TestScaleResource(t *testing.T) {
 }
 
 func TestGetScaleResource(t *testing.T) {
-	defer logtesting.ClearAll()
 	ctx, _ := SetupFakeContext(t)
 
 	deployment := newDeployment(t, fakedynamicclient.Get(ctx), "testdeployment", 5)
 
-	psInformerFactory := NewPodScalableInformerFactory(ctx)
+	psInformerFactory := podscalable.Get(ctx)
 	objectRef := corev1.ObjectReference{
 		Name:       deployment.Name,
 		Kind:       "deployment",

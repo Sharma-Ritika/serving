@@ -40,6 +40,9 @@ type Config struct {
 	// Feature flags.
 	EnableScaleToZero bool
 
+	// Enable connection-aware pod scaledown
+	EnableGracefulScaledown bool
+
 	// Target concurrency knobs for different container concurrency configurations.
 	ContainerConcurrencyTargetFraction float64
 	ContainerConcurrencyTargetDefault  float64
@@ -76,11 +79,17 @@ func NewConfigFromMap(data map[string]string) (*Config, error) {
 		key          string
 		field        *bool
 		defaultValue bool
-	}{{
-		key:          "enable-scale-to-zero",
-		field:        &lc.EnableScaleToZero,
-		defaultValue: true,
-	}} {
+	}{
+		{
+			key:          "enable-scale-to-zero",
+			field:        &lc.EnableScaleToZero,
+			defaultValue: true,
+		},
+		{
+			key:          "enable-graceful-scaledown",
+			field:        &lc.EnableGracefulScaledown,
+			defaultValue: false,
+		}} {
 		if raw, ok := data[b.key]; !ok {
 			*b.field = b.defaultValue
 		} else {
@@ -205,7 +214,7 @@ func validate(lc *Config) (*Config, error) {
 
 	// We can't permit stable window be less than our aggregation window for correctness.
 	if lc.StableWindow < autoscaling.WindowMin {
-		return nil, fmt.Errorf("stable-window = %v, must be at least %v", lc.StableWindow, BucketSize)
+		return nil, fmt.Errorf("stable-window = %v, must be at least %v", lc.StableWindow, autoscaling.WindowMin)
 	}
 	if lc.StableWindow.Round(time.Second) != lc.StableWindow {
 		return nil, fmt.Errorf("stable-window = %v, must be specified with at most second precision", lc.StableWindow)

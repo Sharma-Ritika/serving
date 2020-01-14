@@ -46,6 +46,8 @@ var (
 
 	// ErrNotScraping denotes that the collector is not collecting metrics for the given resource.
 	ErrNotScraping = errors.New("the requested resource is not being scraped")
+
+	tickProvider = time.NewTicker
 )
 
 // StatsScraperFactory creates a StatsScraper for a given Metric.
@@ -109,6 +111,7 @@ type MetricCollector struct {
 	logger *zap.SugaredLogger
 
 	statsScraperFactory StatsScraperFactory
+	tickProvider        func(time.Duration) *time.Ticker
 
 	collections      map[types.NamespacedName]*collection
 	collectionsMutex sync.RWMutex
@@ -119,13 +122,12 @@ var _ MetricClient = (*MetricCollector)(nil)
 
 // NewMetricCollector creates a new metric collector.
 func NewMetricCollector(statsScraperFactory StatsScraperFactory, logger *zap.SugaredLogger) *MetricCollector {
-	collector := &MetricCollector{
+	return &MetricCollector{
 		logger:              logger,
 		collections:         make(map[types.NamespacedName]*collection),
 		statsScraperFactory: statsScraperFactory,
+		tickProvider:        time.NewTicker,
 	}
-
-	return collector
 }
 
 // CreateOrUpdate either creates a collection for the given metric or update it, should
@@ -157,7 +159,7 @@ func (c *MetricCollector) CreateOrUpdate(metric *av1alpha1.Metric) error {
 		return nil
 	}
 
-	c.collections[key] = newCollection(metric, scraper, c.logger)
+	c.collections[key] = newCollection(metric, scraper, c.tickProvider, c.logger)
 	return nil
 }
 
@@ -240,11 +242,11 @@ func (c *collection) getScraper() StatsScraper {
 
 // newCollection creates a new collection, which uses the given scraper to
 // collect stats every scrapeTickInterval.
-func newCollection(metric *av1alpha1.Metric, scraper StatsScraper, logger *zap.SugaredLogger) *collection {
+func newCollection(metric *av1alpha1.Metric, scraper StatsScraper, tickFactory func(time.Duration) *time.Ticker, logger *zap.SugaredLogger) *collection {
 	c := &collection{
 		metric:             metric,
-		concurrencyBuckets: aggregation.NewTimedFloat64Buckets(BucketSize),
-		rpsBuckets:         aggregation.NewTimedFloat64Buckets(BucketSize),
+		concurrencyBuckets: aggregation.NewTimedFloat64Buckets(metric.Spec.StableWindow, BucketSize),
+		rpsBuckets:         aggregation.NewTimedFloat64Buckets(metric.Spec.StableWindow, BucketSize),
 		scraper:            scraper,
 
 		stopCh: make(chan struct{}),
@@ -257,7 +259,7 @@ func newCollection(metric *av1alpha1.Metric, scraper StatsScraper, logger *zap.S
 	go func() {
 		defer c.grp.Done()
 
-		scrapeTicker := time.NewTicker(scrapeTickInterval)
+		scrapeTicker := tickFactory(scrapeTickInterval)
 		for {
 			select {
 			case <-c.stopCh:
@@ -294,6 +296,8 @@ func (c *collection) updateMetric(metric *av1alpha1.Metric) {
 	defer c.metricMutex.Unlock()
 
 	c.metric = metric
+	c.concurrencyBuckets.ResizeWindow(metric.Spec.StableWindow)
+	c.rpsBuckets.ResizeWindow(metric.Spec.StableWindow)
 }
 
 // currentMetric safely returns the current metric stored in the collection.
@@ -306,17 +310,10 @@ func (c *collection) currentMetric() *av1alpha1.Metric {
 
 // record adds a stat to the current collection.
 func (c *collection) record(stat Stat) {
-	spec := c.currentMetric().Spec
-
 	// Proxied requests have been counted at the activator. Subtract
 	// them to avoid double counting.
-	c.concurrencyBuckets.Record(stat.Time, stat.PodName, stat.AverageConcurrentRequests-stat.AverageProxiedConcurrentRequests)
-	c.rpsBuckets.Record(stat.Time, stat.PodName, stat.RequestCount-stat.ProxiedRequestCount)
-
-	// Delete outdated stats taking stat.Time as current time.
-	now := stat.Time
-	c.concurrencyBuckets.RemoveOlderThan(now.Add(-spec.StableWindow))
-	c.rpsBuckets.RemoveOlderThan(now.Add(-spec.StableWindow))
+	c.concurrencyBuckets.Record(stat.Time, stat.AverageConcurrentRequests-stat.AverageProxiedConcurrentRequests)
+	c.rpsBuckets.Record(stat.Time, stat.RequestCount-stat.ProxiedRequestCount)
 }
 
 // stableAndPanicConcurrency calculates both stable and panic concurrency based on the
@@ -335,18 +332,14 @@ func (c *collection) StableAndPanicRPS(now time.Time) (float64, float64, error) 
 // given stats buckets.
 func (c *collection) stableAndPanicStats(now time.Time, buckets *aggregation.TimedFloat64Buckets) (float64, float64, error) {
 	spec := c.currentMetric().Spec
-	var (
-		panicAverage  aggregation.Average
-		stableAverage aggregation.Average
-	)
-	if !buckets.ForEachBucket(
-		aggregation.YoungerThan(now.Add(-spec.PanicWindow), panicAverage.Accumulate),
-		aggregation.YoungerThan(now.Add(-spec.StableWindow), stableAverage.Accumulate),
-	) {
+	var panicAverage aggregation.Average
+
+	if !buckets.ForEachBucket(now,
+		aggregation.YoungerThan(now.Add(-spec.PanicWindow), panicAverage.Accumulate)) {
 		return 0, 0, ErrNoData
 	}
 
-	return stableAverage.Value(), panicAverage.Value(), nil
+	return buckets.WindowAverage(now), panicAverage.Value(), nil
 }
 
 // close stops collecting metrics, stops the scraper.

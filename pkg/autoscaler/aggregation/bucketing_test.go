@@ -81,6 +81,9 @@ func TestTimedFloat64BucketsSimple(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// New implementation test.
 			buckets := NewTimedFloat64Buckets(2*time.Minute, tt.granularity)
+			if !buckets.IsEmpty(trunc1) {
+				t.Error("Unexpected non empty result")
+			}
 			for _, stat := range tt.stats {
 				buckets.Record(stat.time, stat.value)
 			}
@@ -430,23 +433,21 @@ func BenchmarkWindowAverage(b *testing.B) {
 	}
 }
 
-func BenchmarkWindowForEach(b *testing.B) {
-	// Window lengths in secs.
-	for _, wl := range []int{30, 60, 120, 240, 600} {
-		b.Run(fmt.Sprintf("%v-win-len", wl), func(b *testing.B) {
-			tn := time.Now().Truncate(time.Second) // To simplify everything.
-			buckets := NewTimedFloat64Buckets(time.Duration(wl)*time.Second,
-				time.Second /*granularity*/)
-			// Populate with some random data.
-			for i := 0; i < wl; i++ {
-				buckets.Record(tn.Add(time.Duration(i)*time.Second), rand.Float64()*100)
-			}
-			for i := 0; i < b.N; i++ {
-				var avg Average
-				win := tn.Add(time.Duration(wl) * time.Second)
-				buckets.ForEachBucket(win,
-					YoungerThan(tn, avg.Accumulate))
-			}
-		})
+func TestRoundToNDigits(t *testing.T) {
+	if got, want := roundToNDigits(6, 3.6e-17), 0.; got != want {
+		t.Errorf("Rounding = %v, want: %v", got, want)
 	}
+	if got, want := roundToNDigits(3, 0.0004), 0.; got != want {
+		t.Errorf("Rounding = %v, want: %v", got, want)
+	}
+	if got, want := roundToNDigits(3, 1.2345), 1.234; got != want {
+		t.Errorf("Rounding = %v, want: %v", got, want)
+	}
+	if got, want := roundToNDigits(4, 1.2345), 1.2345; got != want {
+		t.Errorf("Rounding = %v, want: %v", got, want)
+	}
+	if got, want := roundToNDigits(6, 12345), 12345.; got != want {
+		t.Errorf("Rounding = %v, want: %v", got, want)
+	}
+
 }

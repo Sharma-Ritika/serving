@@ -24,7 +24,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/sets"
 
 	"knative.dev/pkg/kmeta"
 	"knative.dev/pkg/ptr"
@@ -33,40 +32,44 @@ import (
 	netv1alpha1 "knative.dev/serving/pkg/apis/networking/v1alpha1"
 	"knative.dev/serving/pkg/apis/serving"
 	v1 "knative.dev/serving/pkg/apis/serving/v1"
-	"knative.dev/serving/pkg/apis/serving/v1alpha1"
 	fakeservingclient "knative.dev/serving/pkg/client/injection/client/fake"
 	fakecertinformer "knative.dev/serving/pkg/client/injection/informers/networking/v1alpha1/certificate/fake"
 	fakeciinformer "knative.dev/serving/pkg/client/injection/informers/networking/v1alpha1/ingress/fake"
-	fakerevisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1alpha1/revision/fake"
+	fakerevisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/revision/fake"
 	"knative.dev/serving/pkg/gc"
 	"knative.dev/serving/pkg/reconciler/route/config"
 	"knative.dev/serving/pkg/reconciler/route/resources"
 	"knative.dev/serving/pkg/reconciler/route/traffic"
 
-	. "knative.dev/pkg/logging/testing"
-	. "knative.dev/serving/pkg/testing/v1alpha1"
+	. "knative.dev/serving/pkg/testing/v1"
 )
 
 func TestReconcileIngressInsert(t *testing.T) {
-	_, _, reconciler, _, cancel := newTestReconciler(t)
+	var reconciler *Reconciler
+	ctx, _, _, _, cancel := newTestSetup(t, func(r *Reconciler) {
+		reconciler = r
+	})
 	defer cancel()
 
 	r := Route("test-ns", "test-route")
 	ci := newTestIngress(t, r)
 
-	if _, err := reconciler.reconcileIngress(TestContextWithLogger(t), r, ci); err != nil {
+	if _, err := reconciler.reconcileIngress(ctx, r, ci); err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 }
 
 func TestReconcileIngressUpdate(t *testing.T) {
-	ctx, _, reconciler, _, cancel := newTestReconciler(t)
+	var reconciler *Reconciler
+	ctx, _, _, _, cancel := newTestSetup(t, func(r *Reconciler) {
+		reconciler = r
+	})
 	defer cancel()
 
 	r := Route("test-ns", "test-route")
 
 	ci := newTestIngress(t, r)
-	if _, err := reconciler.reconcileIngress(TestContextWithLogger(t), r, ci); err != nil {
+	if _, err := reconciler.reconcileIngress(ctx, r, ci); err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
@@ -82,7 +85,7 @@ func TestReconcileIngressUpdate(t *testing.T) {
 			},
 		})
 	})
-	if _, err := reconciler.reconcileIngress(TestContextWithLogger(t), r, ci2); err != nil {
+	if _, err := reconciler.reconcileIngress(ctx, r, ci2); err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
@@ -96,7 +99,10 @@ func TestReconcileIngressUpdate(t *testing.T) {
 }
 
 func TestReconcileTargetValidRevision(t *testing.T) {
-	ctx, _, reconciler, _, cancel := newTestReconciler(t)
+	var reconciler *Reconciler
+	ctx, _, _, _, cancel := newTestSetup(t, func(r *Reconciler) {
+		reconciler = r
+	})
 	defer cancel()
 
 	r := Route("test-ns", "test-route", WithRouteLabel(map[string]string{"route": "test-route"}))
@@ -116,7 +122,7 @@ func TestReconcileTargetValidRevision(t *testing.T) {
 		},
 	})
 
-	fakeservingclient.Get(ctx).ServingV1alpha1().Revisions(r.Namespace).Create(rev)
+	fakeservingclient.Get(ctx).ServingV1().Revisions(r.Namespace).Create(rev)
 	fakerevisioninformer.Get(ctx).Informer().GetIndexer().Add(rev)
 
 	// Get timestamp before reconciling, so that we can compare this to the last pinned timestamp
@@ -131,7 +137,7 @@ func TestReconcileTargetValidRevision(t *testing.T) {
 	}
 
 	// Verify last pinned annotation is updated correctly
-	newRev, err := fakeservingclient.Get(ctx).ServingV1alpha1().Revisions(r.Namespace).Get(rev.Name, metav1.GetOptions{})
+	newRev, err := fakeservingclient.Get(ctx).ServingV1().Revisions(r.Namespace).Get(rev.Name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("Error getting revision: %v", err)
 	}
@@ -145,7 +151,10 @@ func TestReconcileTargetValidRevision(t *testing.T) {
 }
 
 func TestReconcileRevisionTargetDoesNotExist(t *testing.T) {
-	ctx, _, reconciler, _, cancel := newTestReconciler(t)
+	var reconciler *Reconciler
+	ctx, _, _, _, cancel := newTestSetup(t, func(r *Reconciler) {
+		reconciler = r
+	})
 	defer cancel()
 
 	r := Route("test-ns", "test-route", WithRouteLabel(map[string]string{"route": "test-route"}))
@@ -163,7 +172,7 @@ func TestReconcileRevisionTargetDoesNotExist(t *testing.T) {
 			StaleRevisionLastpinnedDebounce: time.Minute,
 		},
 	})
-	fakeservingclient.Get(ctx).ServingV1alpha1().Revisions(r.Namespace).Create(rev)
+	fakeservingclient.Get(ctx).ServingV1().Revisions(r.Namespace).Create(rev)
 	fakerevisioninformer.Get(ctx).Informer().GetIndexer().Add(rev)
 
 	// Try reconciling target revisions for a revision that does not exist. No err should be returned
@@ -172,20 +181,20 @@ func TestReconcileRevisionTargetDoesNotExist(t *testing.T) {
 	}
 }
 
-func newTestRevision(namespace string, name string) *v1alpha1.Revision {
-	return &v1alpha1.Revision{
+func newTestRevision(namespace string, name string) *v1.Revision {
+	return &v1.Revision{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 			Annotations: map[string]string{
-				serving.RevisionLastPinnedAnnotationKey: v1alpha1.RevisionLastPinnedString(time.Now().Add(-1 * time.Hour)),
+				serving.RevisionLastPinnedAnnotationKey: v1.RevisionLastPinnedString(time.Now().Add(-1 * time.Hour)),
 			},
 		},
-		Spec: v1alpha1.RevisionSpec{},
+		Spec: v1.RevisionSpec{},
 	}
 }
 
-func getLastPinnedTimestamp(t *testing.T, rev *v1alpha1.Revision) (string, error) {
+func getLastPinnedTimestamp(t *testing.T, rev *v1.Revision) (string, error) {
 	lastPinnedTime, ok := rev.ObjectMeta.Annotations[serving.RevisionLastPinnedAnnotationKey]
 	if !ok {
 		return "", errors.New("last pinned annotation not found")
@@ -193,7 +202,7 @@ func getLastPinnedTimestamp(t *testing.T, rev *v1alpha1.Revision) (string, error
 	return lastPinnedTime, nil
 }
 
-func newTestIngress(t *testing.T, r *v1alpha1.Route, trafficOpts ...func(tc *traffic.Config)) *netv1alpha1.Ingress {
+func newTestIngress(t *testing.T, r *v1.Route, trafficOpts ...func(tc *traffic.Config)) *netv1alpha1.Ingress {
 	tc := &traffic.Config{Targets: map[string]traffic.RevisionTargets{
 		traffic.DefaultTarget: {{
 			TrafficTarget: v1.TrafficTarget{
@@ -212,7 +221,7 @@ func newTestIngress(t *testing.T, r *v1alpha1.Route, trafficOpts ...func(tc *tra
 		SecretName:      "test-secret",
 		SecretNamespace: "test-ns",
 	}}
-	ingress, err := resources.MakeIngress(getContext(), r, tc, tls, sets.NewString(), "foo-ingress")
+	ingress, err := resources.MakeIngress(getContext(), r, tc, tls, "foo-ingress")
 	if err != nil {
 		t.Errorf("Unexpected error %v", err)
 	}
@@ -220,12 +229,15 @@ func newTestIngress(t *testing.T, r *v1alpha1.Route, trafficOpts ...func(tc *tra
 }
 
 func TestReconcileCertificatesInsert(t *testing.T) {
-	ctx, _, reconciler, _, cancel := newTestReconciler(t)
+	var reconciler *Reconciler
+	ctx, _, _, _, cancel := newTestSetup(t, func(r *Reconciler) {
+		reconciler = r
+	})
 	defer cancel()
 
 	r := Route("test-ns", "test-route")
 	certificate := newCerts([]string{"*.default.example.com"}, r)
-	if _, err := reconciler.reconcileCertificate(TestContextWithLogger(t), r, certificate); err != nil {
+	if _, err := reconciler.reconcileCertificate(ctx, r, certificate); err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 	created := getCertificateFromClient(t, ctx, certificate)
@@ -235,12 +247,15 @@ func TestReconcileCertificatesInsert(t *testing.T) {
 }
 
 func TestReconcileCertificateUpdate(t *testing.T) {
-	ctx, _, reconciler, _, cancel := newTestReconciler(t)
+	var reconciler *Reconciler
+	ctx, _, _, _, cancel := newTestSetup(t, func(r *Reconciler) {
+		reconciler = r
+	})
 	defer cancel()
 
 	r := Route("test-ns", "test-route")
 	certificate := newCerts([]string{"old.example.com"}, r)
-	if _, err := reconciler.reconcileCertificate(TestContextWithLogger(t), r, certificate); err != nil {
+	if _, err := reconciler.reconcileCertificate(ctx, r, certificate); err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
@@ -248,7 +263,7 @@ func TestReconcileCertificateUpdate(t *testing.T) {
 	fakecertinformer.Get(ctx).Informer().GetIndexer().Add(storedCert)
 
 	newCertificate := newCerts([]string{"new.example.com"}, r)
-	if _, err := reconciler.reconcileCertificate(TestContextWithLogger(t), r, newCertificate); err != nil {
+	if _, err := reconciler.reconcileCertificate(ctx, r, newCertificate); err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
@@ -262,14 +277,17 @@ func TestReconcileCertificateUpdate(t *testing.T) {
 }
 
 func TestReconcileIngressClassAnnotation(t *testing.T) {
-	ctx, _, reconciler, _, cancel := newTestReconciler(t)
+	var reconciler *Reconciler
+	ctx, _, _, _, cancel := newTestSetup(t, func(r *Reconciler) {
+		reconciler = r
+	})
 	defer cancel()
 
 	const expClass = "foo.ingress.networking.knative.dev"
 
 	r := Route("test-ns", "test-route")
 	ci := newTestIngress(t, r)
-	if _, err := reconciler.reconcileIngress(TestContextWithLogger(t), r, ci); err != nil {
+	if _, err := reconciler.reconcileIngress(ctx, r, ci); err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
@@ -280,7 +298,7 @@ func TestReconcileIngressClassAnnotation(t *testing.T) {
 	// Add ingress.class annotation.
 	ci2.ObjectMeta.Annotations[networking.IngressClassAnnotationKey] = expClass
 
-	if _, err := reconciler.reconcileIngress(TestContextWithLogger(t), r, ci2); err != nil {
+	if _, err := reconciler.reconcileIngress(ctx, r, ci2); err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
@@ -291,7 +309,7 @@ func TestReconcileIngressClassAnnotation(t *testing.T) {
 	}
 }
 
-func newCerts(dnsNames []string, r *v1alpha1.Route) *netv1alpha1.Certificate {
+func newCerts(dnsNames []string, r *v1.Route) *netv1alpha1.Certificate {
 	return &netv1alpha1.Certificate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "test-cert",

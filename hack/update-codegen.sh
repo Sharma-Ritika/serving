@@ -72,13 +72,13 @@ ${GOPATH}/bin/deepcopy-gen \
   -O zz_generated.deepcopy \
   --go-header-file ${REPO_ROOT_DIR}/hack/boilerplate/boilerplate.go.txt \
   -i knative.dev/serving/pkg/apis/config \
-  -i knative.dev/serving/pkg/reconciler/ingress/config \
   -i knative.dev/serving/pkg/reconciler/certificate/config \
   -i knative.dev/serving/pkg/reconciler/gc/config \
   -i knative.dev/serving/pkg/reconciler/revision/config \
   -i knative.dev/serving/pkg/reconciler/route/config \
   -i knative.dev/serving/pkg/activator/config \
   -i knative.dev/serving/pkg/autoscaler \
+  -i knative.dev/serving/pkg/autoscaler/config \
   -i knative.dev/serving/pkg/deployment \
   -i knative.dev/serving/pkg/gc \
   -i knative.dev/serving/pkg/logging \

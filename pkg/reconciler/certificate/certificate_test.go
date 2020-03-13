@@ -18,22 +18,27 @@ package certificate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/adler32"
 	"testing"
 	"time"
 
 	_ "knative.dev/pkg/client/injection/kube/informers/core/v1/service/fake"
+	"knative.dev/pkg/logging"
 	fakecertmanagerclient "knative.dev/serving/pkg/client/certmanager/injection/client/fake"
 	_ "knative.dev/serving/pkg/client/certmanager/injection/informers/acme/v1alpha2/challenge/fake"
 	_ "knative.dev/serving/pkg/client/certmanager/injection/informers/certmanager/v1alpha2/certificate/fake"
 	_ "knative.dev/serving/pkg/client/certmanager/injection/informers/certmanager/v1alpha2/clusterissuer/fake"
+	servingclient "knative.dev/serving/pkg/client/injection/client/fake"
 	_ "knative.dev/serving/pkg/client/injection/informers/networking/v1alpha1/certificate/fake"
+	"knative.dev/serving/pkg/network"
 
 	acmev1alpha2 "github.com/jetstack/cert-manager/pkg/apis/acme/v1alpha2"
 	cmv1alpha2 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1alpha2"
 	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgotesting "k8s.io/client-go/testing"
@@ -41,14 +46,16 @@ import (
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
+	pkgreconciler "knative.dev/pkg/reconciler"
 	"knative.dev/pkg/system"
+	"knative.dev/serving/pkg/apis/networking"
 	"knative.dev/serving/pkg/apis/networking/v1alpha1"
-	"knative.dev/serving/pkg/reconciler"
+	certreconciler "knative.dev/serving/pkg/client/injection/reconciler/networking/v1alpha1/certificate"
 	"knative.dev/serving/pkg/reconciler/certificate/config"
 	"knative.dev/serving/pkg/reconciler/certificate/resources"
 
 	. "knative.dev/pkg/reconciler/testing"
-	. "knative.dev/serving/pkg/reconciler/testing/v1alpha1"
+	. "knative.dev/serving/pkg/reconciler/testing/v1"
 )
 
 const generation = 23132
@@ -102,6 +109,7 @@ func TestNewController(t *testing.T) {
 
 // This is heavily based on the way the OpenShift Ingress controller tests its reconciliation method.
 func TestReconcile(t *testing.T) {
+	retryAttempted := false
 	table := TableTest{{
 		Name: "bad workqueue key",
 		Key:  "too/many/parts",
@@ -109,15 +117,38 @@ func TestReconcile(t *testing.T) {
 		Name: "key not found",
 		Key:  "foo/not-found",
 	}, {
-		Name: "create CM certificate matching Knative Certificate",
+		Name: "create CM certificate matching Knative Certificate, with retry",
 		Objects: []runtime.Object{
 			knCert("knCert", "foo"),
 			nonHTTP01Issuer,
+		},
+		WithReactors: []clientgotesting.ReactionFunc{
+			func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
+				if retryAttempted || !action.Matches("update", "certificates") || action.GetSubresource() != "status" {
+					return false, nil, nil
+				}
+				retryAttempted = true
+				return true, nil, apierrs.NewConflict(v1alpha1.Resource("foo"), "bar", errors.New("foo"))
+			},
 		},
 		WantCreates: []runtime.Object{
 			resources.MakeCertManagerCertificate(certmanagerConfig(), knCert("knCert", "foo")),
 		},
 		WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+			Object: knCertWithStatus("knCert", "foo",
+				&v1alpha1.CertificateStatus{
+					Status: duckv1.Status{
+						ObservedGeneration: generation,
+						Conditions: duckv1.Conditions{{
+							Type:     v1alpha1.CertificateConditionReady,
+							Status:   corev1.ConditionUnknown,
+							Severity: apis.ConditionSeverityError,
+							Reason:   noCMConditionReason,
+							Message:  noCMConditionMessage,
+						}},
+					},
+				}),
+		}, {
 			Object: knCertWithStatus("knCert", "foo",
 				&v1alpha1.CertificateStatus{
 					Status: duckv1.Status{
@@ -206,9 +237,8 @@ func TestReconcile(t *testing.T) {
 		WantEvents: []string{
 			Eventf(corev1.EventTypeWarning, "UpdateFailed", "Failed to create Cert-Manager Certificate %s: %v",
 				"foo/knCert", "inducing failure for update certificates"),
-			Eventf(corev1.EventTypeWarning, "InternalError", "failed to update Cert-Manager Certificate: inducing failure for update certificates"),
-			Eventf(corev1.EventTypeWarning, "UpdateFailed", "Failed to update status for Certificate %s: %v",
-				"foo/knCert", "inducing failure for update certificates"),
+			Eventf(corev1.EventTypeWarning, "UpdateFailed", "Failed to update status for %q: %v",
+				"knCert", "inducing failure for update certificates"),
 		},
 		Key: "foo/knCert",
 	}, {
@@ -319,30 +349,32 @@ func TestReconcile(t *testing.T) {
 	}}
 
 	table.Test(t, MakeFactory(func(ctx context.Context, listers *Listers, cmw configmap.Watcher) controller.Reconciler {
-		return &Reconciler{
-			Base:                reconciler.NewBase(ctx, controllerAgentName, cmw),
-			knCertificateLister: listers.GetKnCertificateLister(),
+		retryAttempted = false
+		r := &Reconciler{
 			cmCertificateLister: listers.GetCMCertificateLister(),
 			cmChallengeLister:   listers.GetCMChallengeLister(),
 			cmIssuerLister:      listers.GetCMClusterIssuerLister(),
 			svcLister:           listers.GetK8sServiceLister(),
 			certManagerClient:   fakecertmanagerclient.Get(ctx),
 			tracker:             &NullTracker{},
-			configStore: &testConfigStore{
-				config: &config.Config{
-					CertManager: certmanagerConfig(),
-				},
-			},
 		}
+		return certreconciler.NewReconciler(ctx, logging.FromContext(ctx), servingclient.Get(ctx),
+			listers.GetCertificateLister(), controller.GetEventRecorder(ctx), r,
+			network.CertManagerCertificateClassName, controller.Options{
+				ConfigStore: &testConfigStore{
+					config: &config.Config{
+						CertManager: certmanagerConfig(),
+					},
+				},
+			})
 	}))
 }
 
 func TestReconcile_HTTP01Challenges(t *testing.T) {
 	table := TableTest{{
-		Name:                    "fail to set status.HTTP01Challenges",
-		Key:                     "foo/knCert",
-		SkipNamespaceValidation: true,
-		WantErr:                 true,
+		Name:    "fail to set status.HTTP01Challenges",
+		Key:     "foo/knCert",
+		WantErr: true,
 		Objects: []runtime.Object{
 			knCert("knCert", "foo"),
 			http01Issuer,
@@ -463,21 +495,23 @@ func TestReconcile_HTTP01Challenges(t *testing.T) {
 	}}
 
 	table.Test(t, MakeFactory(func(ctx context.Context, listers *Listers, cmw configmap.Watcher) controller.Reconciler {
-		return &Reconciler{
-			Base:                reconciler.NewBase(ctx, controllerAgentName, cmw),
-			knCertificateLister: listers.GetKnCertificateLister(),
+		r := &Reconciler{
 			cmCertificateLister: listers.GetCMCertificateLister(),
 			cmChallengeLister:   listers.GetCMChallengeLister(),
 			cmIssuerLister:      listers.GetCMClusterIssuerLister(),
 			svcLister:           listers.GetK8sServiceLister(),
 			certManagerClient:   fakecertmanagerclient.Get(ctx),
 			tracker:             &NullTracker{},
-			configStore: &testConfigStore{
-				config: &config.Config{
-					CertManager: certmanagerConfig(),
-				},
-			},
 		}
+		return certreconciler.NewReconciler(ctx, logging.FromContext(ctx), servingclient.Get(ctx),
+			listers.GetCertificateLister(), controller.GetEventRecorder(ctx), r,
+			network.CertManagerCertificateClassName, controller.Options{
+				ConfigStore: &testConfigStore{
+					config: &config.Config{
+						CertManager: certmanagerConfig(),
+					},
+				},
+			})
 	}))
 }
 
@@ -489,7 +523,7 @@ func (t *testConfigStore) ToContext(ctx context.Context) context.Context {
 	return config.ToContext(ctx, t.config)
 }
 
-var _ reconciler.ConfigStore = (*testConfigStore)(nil)
+var _ pkgreconciler.ConfigStore = (*testConfigStore)(nil)
 
 func certmanagerConfig() *config.CertManagerConfig {
 	return &config.CertManagerConfig{
@@ -514,6 +548,9 @@ func knCertWithStatusAndGeneration(name, namespace string, status *v1alpha1.Cert
 			Name:       name,
 			Namespace:  namespace,
 			Generation: int64(gen),
+			Annotations: map[string]string{
+				networking.CertificateClassAnnotationKey: network.CertManagerCertificateClassName,
+			},
 		},
 		Spec: v1alpha1.CertificateSpec{
 			DNSNames:   correctDNSNames,

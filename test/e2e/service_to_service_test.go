@@ -29,7 +29,7 @@ import (
 	"knative.dev/pkg/test/logstream"
 	"knative.dev/pkg/test/spoof"
 	"knative.dev/serving/pkg/apis/autoscaling"
-	routeconfig "knative.dev/serving/pkg/reconciler/route/config"
+	"knative.dev/serving/pkg/apis/serving"
 	v1alph1testing "knative.dev/serving/pkg/testing/v1alpha1"
 	"knative.dev/serving/test"
 	v1a1test "knative.dev/serving/test/v1alpha1"
@@ -119,7 +119,7 @@ func testProxyToHelloworld(t *testing.T, clients *test.Clients, helloworldURL *u
 	defer test.TearDown(clients, names)
 
 	resources, _, err := v1a1test.CreateRunLatestServiceReady(t, clients, &names,
-		false, /* https TODO(taragu) turn this on after helloworld test running with https */
+		test.ServingFlags.Https,
 		v1alph1testing.WithEnv(envVars...),
 		v1alph1testing.WithConfigAnnotations(map[string]string{
 			autoscaling.WindowAnnotationKey: "6s", // shortest permitted; this is not required here, but for uniformity.
@@ -195,9 +195,9 @@ func TestServiceToServiceCall(t *testing.T) {
 	defer test.TearDown(clients, names)
 
 	withInternalVisibility := v1alph1testing.WithServiceLabel(
-		routeconfig.VisibilityLabelKey, routeconfig.VisibilityClusterLocal)
+		serving.VisibilityLabelKey, serving.VisibilityClusterLocal)
 	resources, _, err := v1a1test.CreateRunLatestServiceReady(t, clients, &names,
-		false, /* https TODO(taragu) turn this on after helloworld test running with https */
+		test.ServingFlags.Https,
 		withInternalVisibility,
 		v1alph1testing.WithConfigAnnotations(map[string]string{
 			autoscaling.WindowAnnotationKey: "6s", // shortest permitted; this is not required here, but for uniformity.
@@ -242,13 +242,13 @@ func testSvcToSvcCallViaActivator(t *testing.T, clients *test.Clients, injectA b
 	}
 
 	withInternalVisibility := v1alph1testing.WithServiceLabel(
-		routeconfig.VisibilityLabelKey, routeconfig.VisibilityClusterLocal)
+		serving.VisibilityLabelKey, serving.VisibilityClusterLocal)
 
 	test.CleanupOnInterrupt(func() { test.TearDown(clients, testNames) })
 	defer test.TearDown(clients, testNames)
 
 	resources, _, err := v1a1test.CreateRunLatestServiceReady(t, clients, &testNames,
-		false, /* https TODO(taragu) turn this on after helloworld test running with https */
+		test.ServingFlags.Https,
 		v1alph1testing.WithConfigAnnotations(map[string]string{
 			autoscaling.TargetBurstCapacityKey: "-1",
 			"sidecar.istio.io/inject":          strconv.FormatBool(injectB),
@@ -304,7 +304,7 @@ func TestCallToPublicService(t *testing.T) {
 	defer test.TearDown(clients, names)
 
 	resources, _, err := v1a1test.CreateRunLatestServiceReady(t, clients, &names,
-		false, /* https TODO(taragu) turn this on after helloworld test running with https */
+		test.ServingFlags.Https,
 		v1alph1testing.WithConfigAnnotations(map[string]string{
 			autoscaling.WindowAnnotationKey: "6s", // shortest permitted; this is not required here, but for uniformity.
 		}))

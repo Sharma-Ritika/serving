@@ -20,20 +20,17 @@ import (
 	"context"
 	"fmt"
 
-	"go.uber.org/zap"
-
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	autoscalingv2beta1listers "k8s.io/client-go/listers/autoscaling/v2beta1"
-	"k8s.io/client-go/tools/cache"
-	"knative.dev/pkg/controller"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/ptr"
+	pkgreconciler "knative.dev/pkg/reconciler"
 	"knative.dev/serving/pkg/apis/autoscaling"
 	pav1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	nv1alpha1 "knative.dev/serving/pkg/apis/networking/v1alpha1"
+	pareconciler "knative.dev/serving/pkg/client/injection/reconciler/autoscaling/v1alpha1/podautoscaler"
 	areconciler "knative.dev/serving/pkg/reconciler/autoscaling"
 	"knative.dev/serving/pkg/reconciler/autoscaling/config"
 	"knative.dev/serving/pkg/reconciler/autoscaling/hpa/resources"
@@ -45,57 +42,11 @@ type Reconciler struct {
 	hpaLister autoscalingv2beta1listers.HorizontalPodAutoscalerLister
 }
 
-var _ controller.Reconciler = (*Reconciler)(nil)
+// Check that our Reconciler implements pareconciler.Interface
+var _ pareconciler.Interface = (*Reconciler)(nil)
 
-// Reconcile is the entry point to the reconciliation control loop.
-func (c *Reconciler) Reconcile(ctx context.Context, key string) error {
+func (c *Reconciler) ReconcileKind(ctx context.Context, pa *pav1alpha1.PodAutoscaler) pkgreconciler.Event {
 	logger := logging.FromContext(ctx)
-	ctx = c.ConfigStore.ToContext(ctx)
-
-	namespace, name, err := cache.SplitMetaNamespaceKey(key)
-	if err != nil {
-		logger.Errorw("Invalid resource key", zap.Error(err))
-		return nil
-	}
-
-	logger.Debug("Reconcile hpa-class PodAutoscaler")
-
-	original, err := c.PALister.PodAutoscalers(namespace).Get(name)
-	if errors.IsNotFound(err) {
-		logger.Info("PA in work queue no longer exists")
-		return nil
-	} else if err != nil {
-		return err
-	}
-
-	// Don't modify the informer's copy.
-	pa := original.DeepCopy()
-	// Reconcile this copy of the pa and then write back any status
-	// updates regardless of whether the reconciliation errored out.
-	reconcileErr := c.reconcile(ctx, key, pa)
-	if equality.Semantic.DeepEqual(original.Status, pa.Status) {
-		// If we didn't change anything then don't call updateStatus.
-		// This is important because the copy we loaded from the informer's
-		// cache may be stale and we don't want to overwrite a prior update
-		// to status with this stale state.
-	} else if err = c.UpdateStatus(original, pa); err != nil {
-		logger.Warnw("Failed to update pa status", zap.Error(err))
-		c.Recorder.Eventf(pa, corev1.EventTypeWarning, "UpdateFailed",
-			"Failed to update status for PA %q: %v", pa.Name, err)
-		return err
-	}
-	if reconcileErr != nil {
-		c.Recorder.Event(pa, corev1.EventTypeWarning, "InternalError", reconcileErr.Error())
-	}
-	return reconcileErr
-}
-
-func (c *Reconciler) reconcile(ctx context.Context, key string, pa *pav1alpha1.PodAutoscaler) error {
-	logger := logging.FromContext(ctx)
-
-	if pa.GetDeletionTimestamp() != nil {
-		return nil
-	}
 
 	// We may be reading a version of the object that was stored at an older version
 	// and may not have had all of the assumed defaults specified.  This won't result
@@ -114,7 +65,7 @@ func (c *Reconciler) reconcile(ctx context.Context, key string, pa *pav1alpha1.P
 	hpa, err := c.hpaLister.HorizontalPodAutoscalers(pa.Namespace).Get(desiredHpa.Name)
 	if errors.IsNotFound(err) {
 		logger.Infof("Creating HPA %q", desiredHpa.Name)
-		if hpa, err = c.KubeClientSet.AutoscalingV2beta1().HorizontalPodAutoscalers(pa.Namespace).Create(desiredHpa); err != nil {
+		if hpa, err = c.KubeClient.AutoscalingV2beta1().HorizontalPodAutoscalers(pa.Namespace).Create(desiredHpa); err != nil {
 			pa.Status.MarkResourceFailedCreation("HorizontalPodAutoscaler", desiredHpa.Name)
 			return fmt.Errorf("failed to create HPA: %w", err)
 		}
@@ -127,7 +78,7 @@ func (c *Reconciler) reconcile(ctx context.Context, key string, pa *pav1alpha1.P
 	}
 	if !equality.Semantic.DeepEqual(desiredHpa.Spec, hpa.Spec) {
 		logger.Infof("Updating HPA %q", desiredHpa.Name)
-		if _, err := c.KubeClientSet.AutoscalingV2beta1().HorizontalPodAutoscalers(pa.Namespace).Update(desiredHpa); err != nil {
+		if _, err := c.KubeClient.AutoscalingV2beta1().HorizontalPodAutoscalers(pa.Namespace).Update(desiredHpa); err != nil {
 			return fmt.Errorf("failed to update HPA: %w", err)
 		}
 	}
@@ -151,11 +102,6 @@ func (c *Reconciler) reconcile(ctx context.Context, key string, pa *pav1alpha1.P
 		pa.Status.MarkInactive("ServicesNotReady", "SKS Services are not ready yet")
 	} else {
 		pa.Status.MarkActive()
-	}
-
-	// Metrics services are no longer needed as we use the private services now.
-	if err := c.DeleteMetricsServices(ctx, pa); err != nil {
-		return err
 	}
 
 	pa.Status.ObservedGeneration = pa.Generation

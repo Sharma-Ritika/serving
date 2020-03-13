@@ -16,36 +16,36 @@ limitations under the License.
 package handler
 
 import (
-	"context"
 	"net/http"
 	"time"
 
+	pkgmetrics "knative.dev/pkg/metrics"
 	"knative.dev/serving/pkg/activator"
+	"knative.dev/serving/pkg/activator/util"
 	"knative.dev/serving/pkg/apis/serving"
 	pkghttp "knative.dev/serving/pkg/http"
+	"knative.dev/serving/pkg/metrics"
 )
 
 // NewMetricHandler creates a handler collects and reports request metrics
-func NewMetricHandler(ctx context.Context, r activator.StatsReporter, next http.Handler) *MetricHandler {
-	handler := &MetricHandler{
+func NewMetricHandler(podName string, next http.Handler) *MetricHandler {
+	return &MetricHandler{
 		nextHandler: next,
-		reporter:    r,
+		podName:     podName,
 	}
-
-	return handler
 }
 
 // MetricHandler sends metrics via reporter
 type MetricHandler struct {
-	reporter    activator.StatsReporter
+	podName     string
 	nextHandler http.Handler
 }
 
 func (h *MetricHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	revID := revIDFrom(r.Context())
-	revision := revisionFrom(r.Context())
-	configurationName := revision.Labels[serving.ConfigurationLabelKey]
-	serviceName := revision.Labels[serving.ServiceLabelKey]
+	rev := util.RevisionFrom(r.Context())
+	reporterCtx, _ := metrics.PodRevisionContext(h.podName, activator.Name,
+		rev.Namespace, rev.Labels[serving.ServiceLabelKey], rev.Labels[serving.ConfigurationLabelKey], rev.Name)
+
 	start := time.Now()
 
 	rr := pkghttp.NewResponseRecorder(w, http.StatusOK)
@@ -53,10 +53,12 @@ func (h *MetricHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err := recover()
 		latency := time.Since(start)
 		if err != nil {
-			h.reporter.ReportResponseTime(revID.Namespace, serviceName, configurationName, revID.Name, http.StatusInternalServerError, latency)
+			reporterCtx := metrics.AugmentWithResponse(reporterCtx, http.StatusInternalServerError)
+			pkgmetrics.RecordBatch(reporterCtx, responseTimeInMsecM.M(float64(latency.Milliseconds())), requestCountM.M(1))
 			panic(err)
 		}
-		h.reporter.ReportResponseTime(revID.Namespace, serviceName, configurationName, revID.Name, rr.ResponseCode, latency)
+		reporterCtx := metrics.AugmentWithResponse(reporterCtx, rr.ResponseCode)
+		pkgmetrics.RecordBatch(reporterCtx, responseTimeInMsecM.M(float64(latency.Milliseconds())), requestCountM.M(1))
 	}()
 
 	h.nextHandler.ServeHTTP(rr, r)

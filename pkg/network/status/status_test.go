@@ -120,9 +120,6 @@ func TestProbeLifecycle(t *testing.T) {
 			ready <- ing
 		})
 
-	prober.stateExpiration = 2 * time.Second
-	prober.cleanupPeriod = 500 * time.Millisecond
-
 	done := make(chan struct{})
 	cancelled := prober.Start(done)
 	defer func() {
@@ -160,22 +157,22 @@ func TestProbeLifecycle(t *testing.T) {
 		if !ok {
 			t.Fatal("IsReady() returned false")
 		}
-		time.Sleep(prober.cleanupPeriod)
 	}
 
+	// Cancel Ingress probing -> deletes the cached state
+	prober.CancelIngressProbing(ing)
+
 	select {
-	// Wait for the cleanup to happen
-	case <-time.After(prober.stateExpiration + prober.cleanupPeriod):
-		break
 	// Validate that no probe requests were issued (cached)
 	case <-probeRequests:
 		t.Fatal("An unexpected probe request was received")
 	// Validate that no requests went through the probe handler
 	case <-dummyRequests:
 		t.Fatal("An unexpected request went through the probe handler")
+	default:
 	}
 
-	// The state has expired and been removed
+	// The state has been removed and IsReady must return False
 	ok, err = prober.IsReady(context.Background(), ing)
 	if err != nil {
 		t.Fatalf("IsReady failed: %v", err)
@@ -534,6 +531,85 @@ func TestCancelIngressProbing(t *testing.T) {
 		if !strings.HasPrefix(req.Host, domain) {
 			t.Fatalf("Host = %s, want: %s", req.Host, domain)
 		}
+	}
+}
+
+func TestProbeVerifier(t *testing.T) {
+	const hash = "Hi! I am hash!"
+	prober := NewProber(zaptest.NewLogger(t).Sugar(), nil, nil)
+	verifier := prober.probeVerifier(&workItem{
+		ingressState: &ingressState{
+			hash: hash,
+		},
+		podState: nil,
+		context:  nil,
+		url:      nil,
+		podIP:    "",
+		podPort:  "",
+	})
+	cases := []struct {
+		name string
+		resp *http.Response
+		want bool
+	}{{
+		name: "HTTP 200 matching hash",
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{network.HashHeaderName: []string{hash}},
+		},
+		want: true,
+	}, {
+		name: "HTTP 200 mismatching hash",
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{network.HashHeaderName: []string{"nope"}},
+		},
+		want: false,
+	}, {
+		name: "HTTP 200 missing header",
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+		},
+		want: true,
+	}, {
+		name: "HTTP 404",
+		resp: &http.Response{
+			StatusCode: http.StatusNotFound,
+		},
+		want: false,
+	}, {
+		name: "HTTP 503",
+		resp: &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+		},
+		want: false,
+	}, {
+		name: "HTTP 403",
+		resp: &http.Response{
+			StatusCode: http.StatusForbidden,
+		},
+		want: true,
+	}, {
+		name: "HTTP 503",
+		resp: &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+		},
+		want: false,
+	}, {
+		name: "HTTP 302",
+		resp: &http.Response{
+			StatusCode: http.StatusFound,
+		},
+		want: true,
+	}}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, _ := verifier(c.resp, nil)
+			if got != c.want {
+				t.Errorf("got: %v, want: %v", got, c.want)
+			}
+		})
 	}
 }
 

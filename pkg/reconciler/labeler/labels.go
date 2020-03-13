@@ -28,7 +28,7 @@ import (
 	"knative.dev/pkg/kmeta"
 
 	"knative.dev/serving/pkg/apis/serving"
-	"knative.dev/serving/pkg/apis/serving/v1alpha1"
+	v1 "knative.dev/serving/pkg/apis/serving/v1"
 )
 
 // accessor defines an abstraction for manipulating labeled entity
@@ -41,7 +41,7 @@ type accessor interface {
 
 // syncLabels makes sure that the revisions and configurations referenced from
 // a Route are labeled with route labels.
-func (c *Reconciler) syncLabels(ctx context.Context, r *v1alpha1.Route) error {
+func (c *Reconciler) syncLabels(ctx context.Context, r *v1.Route) error {
 	revisions := sets.NewString()
 	configs := sets.NewString()
 
@@ -53,9 +53,22 @@ func (c *Reconciler) syncLabels(ctx context.Context, r *v1alpha1.Route) error {
 			return err
 		}
 		revisions.Insert(tt.RevisionName)
+
+		// If the owner reference is a configuration, add it to the list of configurations
 		owner := metav1.GetControllerOf(rev)
 		if owner != nil && owner.Kind == "Configuration" {
 			configs.Insert(owner.Name)
+
+			// If we are tracking the latest revision, add the latest created revision as well
+			// so that there is a smooth transition when the new revision becomes ready.
+			if tt.LatestRevision != nil && *tt.LatestRevision {
+				config, err := c.configurationLister.Configurations(r.Namespace).Get(owner.Name)
+				if err != nil {
+					return err
+				}
+
+				revisions.Insert(config.Status.LatestCreatedRevisionName)
+			}
 		}
 	}
 
@@ -88,7 +101,7 @@ func (c *Reconciler) clearLabels(ctx context.Context, ns, name string) error {
 
 // setLabelForListed uses the accessor to attach the label for this route to every element
 // listed within "names" in the same namespace.
-func setLabelForListed(ctx context.Context, route *v1alpha1.Route, acc accessor, names sets.String) error {
+func setLabelForListed(ctx context.Context, route *v1.Route, acc accessor, names sets.String) error {
 	for name := range names {
 		elt, err := acc.get(route.Namespace, name)
 		if err != nil {
@@ -186,7 +199,7 @@ func (r *revision) list(ns, name string) ([]kmeta.Accessor, error) {
 
 // patch implements accessor
 func (r *revision) patch(ns, name string, pt types.PatchType, p []byte) error {
-	_, err := r.r.ServingClientSet.ServingV1alpha1().Revisions(ns).Patch(name, pt, p)
+	_, err := r.r.client.ServingV1().Revisions(ns).Patch(name, pt, p)
 	return err
 }
 
@@ -221,6 +234,6 @@ func (c *configuration) list(ns, name string) ([]kmeta.Accessor, error) {
 
 // patch implements accessor
 func (c *configuration) patch(ns, name string, pt types.PatchType, p []byte) error {
-	_, err := c.r.ServingClientSet.ServingV1alpha1().Configurations(ns).Patch(name, pt, p)
+	_, err := c.r.client.ServingV1().Configurations(ns).Patch(name, pt, p)
 	return err
 }

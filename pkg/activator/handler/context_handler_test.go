@@ -26,6 +26,7 @@ import (
 
 	rtesting "knative.dev/pkg/reconciler/testing"
 	"knative.dev/serving/pkg/activator"
+	"knative.dev/serving/pkg/activator/util"
 )
 
 func TestContextHandler(t *testing.T) {
@@ -36,11 +37,11 @@ func TestContextHandler(t *testing.T) {
 	revisionInformer(ctx, revision)
 
 	baseHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := revisionFrom(r.Context()); got != revision {
+		if got := util.RevisionFrom(r.Context()); got != revision {
 			t.Errorf("revisionFrom() = %v, want %v", got, revision)
 		}
 
-		if got := revIDFrom(r.Context()); got != revID {
+		if got := util.RevIDFrom(r.Context()); got != revID {
 			t.Errorf("revIDFrom() = %v, want %v", got, revID)
 		}
 	})
@@ -79,6 +80,47 @@ func TestContextHandlerError(t *testing.T) {
 
 	if got, want := resp.Body.String(), errMsg(`revision.serving.knative.dev "fooname" not found`); got != want {
 		t.Errorf("Body = %q, want %q", got, want)
+	}
+}
+
+func BenchmarkContextHandler(b *testing.B) {
+	tests := []struct {
+		label        string
+		revisionName string
+	}{{
+		label:        "context handler success",
+		revisionName: testRevName,
+	}, {
+		label:        "context handler failure",
+		revisionName: "fake",
+	}}
+	ctx, cancel, _ := rtesting.SetupFakeContextWithCancel(&testing.T{})
+	defer cancel()
+	revision := revision(testNamespace, testRevName)
+	revisionInformer(ctx, revision)
+
+	baseHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+
+	handler := NewContextHandler(ctx, baseHandler)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com", nil)
+	req.Header.Set(activator.RevisionHeaderNamespace, testNamespace)
+
+	for _, test := range tests {
+		req.Header.Set(activator.RevisionHeaderName, test.revisionName)
+		b.Run(fmt.Sprintf("%s-sequential", test.label), func(b *testing.B) {
+			resp := httptest.NewRecorder()
+			for j := 0; j < b.N; j++ {
+				handler.ServeHTTP(resp, req)
+			}
+		})
+		b.Run(fmt.Sprintf("%s-parallel", test.label), func(b *testing.B) {
+			b.RunParallel(func(pb *testing.PB) {
+				resp := httptest.NewRecorder()
+				for pb.Next() {
+					handler.ServeHTTP(resp, req)
+				}
+			})
+		})
 	}
 }
 

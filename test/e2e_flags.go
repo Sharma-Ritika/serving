@@ -25,26 +25,6 @@ import (
 	"knative.dev/serving/pkg/network"
 )
 
-const (
-	// ServingNamespace is the default namespace for serving e2e tests
-	ServingNamespace = "serving-tests"
-
-	// AlternativeServingNamespace is a different namepace to run cross-
-	// namespace tests in.
-	AlternativeServingNamespace = "serving-tests-alt"
-
-	// Environment propagation conformance test objects
-
-	// ConformanceConfigMap is the name of the configmap to propagate env variables from
-	ConformanceConfigMap = "conformance-test-configmap"
-	// ConformanceSecret is the name of the secret to propagate env variables from
-	ConformanceSecret = "conformance-test-secret"
-	// EnvKey is the configmap/secret key which contains test value
-	EnvKey = "testKey"
-	// EnvValue is the configmap/secret test value to match env variable with
-	EnvValue = "testValue"
-)
-
 // ServingFlags holds the flags or defaults for knative/serving settings in the user's environment.
 var ServingFlags = initializeServingFlags()
 
@@ -53,6 +33,7 @@ type ServingEnvironmentFlags struct {
 	ResolvableDomain bool   // Resolve Route controller's `domainSuffix`
 	Https            bool   // Indicates where the test service will be created with https
 	IngressClass     string // Indicates the class of Ingress provider to test.
+	CertificateClass string // Indicates the class of Certificate provider to test.
 }
 
 func initializeServingFlags() *ServingEnvironmentFlags {
@@ -66,6 +47,8 @@ func initializeServingFlags() *ServingEnvironmentFlags {
 
 	flag.StringVar(&f.IngressClass, "ingressClass", network.IstioIngressClassName,
 		"Set this flag to the ingress class to test against.")
+	flag.StringVar(&f.CertificateClass, "certificateClass", network.CertManagerCertificateClassName,
+		"Set this flag to the certificate class to test against.")
 
 	return &f
 }

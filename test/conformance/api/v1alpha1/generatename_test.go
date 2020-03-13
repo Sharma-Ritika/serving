@@ -125,7 +125,7 @@ func TestServiceGenerateName(t *testing.T) {
 	// Create the service using the generate name field. If the service does not become ready this will fail.
 	t.Logf("Creating new service with generateName %s", generateName)
 	resources, _, err := v1a1test.CreateRunLatestServiceReady(t, clients, &names,
-		false, /* https TODO(taragu) turn this on after helloworld test running with https */
+		test.ServingFlags.Https,
 		setServiceGenerateName(generateName))
 	if err != nil {
 		t.Fatalf("Failed to create service with generateName %s: %v", generateName, err)
@@ -169,7 +169,7 @@ func TestRouteAndConfigGenerateName(t *testing.T) {
 
 	// Ensure the associated revision is created. This also checks that the configuration becomes ready.
 	t.Log("The configuration will be updated with the name of the associated Revision once it is created.")
-	names.Revision, err = v1a1test.WaitForConfigLatestRevision(clients, names)
+	names.Revision, err = v1a1test.WaitForConfigLatestUnpinnedRevision(clients, names)
 	if err != nil {
 		t.Fatalf("Configuration %s was not updated with the new revision: %v", names.Config, err)
 	}

@@ -41,11 +41,12 @@ import (
 	rtesting "knative.dev/pkg/reconciler/testing"
 	"knative.dev/pkg/system"
 	_ "knative.dev/pkg/system/testing"
+	"knative.dev/serving/pkg/activator/util"
 	"knative.dev/serving/pkg/apis/networking"
-	"knative.dev/serving/pkg/apis/serving/v1alpha1"
+	v1 "knative.dev/serving/pkg/apis/serving/v1"
 	fakeservingclient "knative.dev/serving/pkg/client/injection/client/fake"
-	revisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1alpha1/revision"
-	fakerevisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1alpha1/revision/fake"
+	revisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/revision"
+	fakerevisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/revision/fake"
 	"knative.dev/serving/pkg/queue"
 )
 
@@ -62,23 +63,26 @@ type tryResult struct {
 	err  error
 }
 
-func newTestThrottler(ctx context.Context, numA int32) *Throttler {
-	throttler := NewThrottler(ctx, defaultParams, "10.10.10.10:8012")
+func newTestThrottler(ctx context.Context, numA int32) (*Throttler, func()) {
+	// Use different values for the test.
+	bp := breakerParams
+	breakerParams = defaultParams
+
+	throttler := NewThrottler(ctx, "10.10.10.10:8012")
 	atomic.StoreInt32(&throttler.numActivators, numA)
 	atomic.StoreInt32(&throttler.activatorIndex, 0)
-	return throttler
+	return throttler, func() {
+		breakerParams = bp
+	}
 }
 
 func TestThrottlerUpdateCapacity(t *testing.T) {
-	logger := TestLogger(t)
-	throttler := &Throttler{
-		revisionThrottlers: make(map[types.NamespacedName]*revisionThrottler),
-		breakerParams:      defaultParams,
-		numActivators:      1,
-		logger:             logger,
-	}
+	ctx, cancel, _ := rtesting.SetupFakeContextWithCancel(t)
+	defer cancel()
+	throttler, cleanup := newTestThrottler(ctx, 1)
+	defer cleanup()
 	rt := &revisionThrottler{
-		logger:               logger,
+		logger:               throttler.logger,
 		breaker:              queue.NewBreaker(defaultParams),
 		containerConcurrency: 10,
 	}
@@ -168,7 +172,7 @@ func TestThrottlerUpdateCapacity(t *testing.T) {
 		t.Errorf("Capacity = %d, want: %d", got, want)
 	}
 
-	// Inifinite capacity.
+	// Infinite capacity.
 	throttler.activatorIndex = 1
 	rt.containerConcurrency = 0
 	rt.podTrackers = makeTrackers(3, 0)
@@ -211,35 +215,37 @@ func TestThrottlerErrorNoRevision(t *testing.T) {
 	}()
 
 	// Add the revision we're testing.
-	revID := types.NamespacedName{testNamespace, testRevision}
+	revID := types.NamespacedName{Namespace: testNamespace, Name: testRevision}
 	revision := revisionCC1(revID, networking.ProtocolHTTP1)
-	servfake.ServingV1alpha1().Revisions(revision.Namespace).Create(revision)
+	servfake.ServingV1().Revisions(revision.Namespace).Create(revision)
 	revisions.Informer().GetIndexer().Add(revision)
 
-	throttler := newTestThrottler(ctx, 1)
+	throttler, cleanup := newTestThrottler(ctx, 1)
+	defer cleanup()
 	throttler.handleUpdate(revisionDestsUpdate{
 		Rev:   revID,
 		Dests: sets.NewString("128.0.0.1:1234"),
 	})
 
 	// Make sure it now works.
-	if err := throttler.Try(context.Background(), revID, func(string) error { return nil }); err != nil {
+	ctx = util.WithRevID(ctx, revID)
+	if err := throttler.Try(ctx, func(string) error { return nil }); err != nil {
 		t.Fatalf("Try() = %v, want no error", err)
 	}
 
 	// Make sure errors are propagated correctly.
 	innerError := errors.New("inner")
-	if err := throttler.Try(context.Background(), revID, func(string) error { return innerError }); err != innerError {
+	if err := throttler.Try(ctx, func(string) error { return innerError }); err != innerError {
 		t.Fatalf("Try() = %v, want %v", err, innerError)
 	}
 
-	servfake.ServingV1alpha1().Revisions(revision.Namespace).Delete(revision.Name, nil)
+	servfake.ServingV1().Revisions(revision.Namespace).Delete(revision.Name, nil)
 	revisions.Informer().GetIndexer().Delete(revID)
 
 	// Eventually it should now fail.
 	var lastError error
 	wait.PollInfinite(10*time.Millisecond, func() (bool, error) {
-		lastError = throttler.Try(context.Background(), revID, func(string) error { return nil })
+		lastError = throttler.Try(ctx, func(string) error { return nil })
 		return lastError != nil, nil
 	})
 	if lastError == nil || lastError.Error() != `revision.serving.knative.dev "test-revision" not found` {
@@ -261,12 +267,13 @@ func TestThrottlerErrorOneTimesOut(t *testing.T) {
 	}()
 
 	// Add the revision we're testing.
-	revID := types.NamespacedName{testNamespace, testRevision}
+	revID := types.NamespacedName{Namespace: testNamespace, Name: testRevision}
 	revision := revisionCC1(revID, networking.ProtocolHTTP1)
-	servfake.ServingV1alpha1().Revisions(revision.Namespace).Create(revision)
+	servfake.ServingV1().Revisions(revision.Namespace).Create(revision)
 	revisions.Informer().GetIndexer().Add(revision)
 
-	throttler := newTestThrottler(ctx, 1)
+	throttler, cleanup := newTestThrottler(ctx, 1)
+	defer cleanup()
 	throttler.handleUpdate(revisionDestsUpdate{
 		Rev:           revID,
 		ClusterIPDest: "129.0.0.1:1234",
@@ -299,43 +306,43 @@ func TestThrottlerErrorOneTimesOut(t *testing.T) {
 func TestThrottlerSuccesses(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		revision    *v1alpha1.Revision
+		revision    *v1.Revision
 		initUpdates []revisionDestsUpdate
 		requests    int
 		wantDests   sets.String
 	}{{
 		name:     "single healthy podIP",
-		revision: revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1),
+		revision: revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1),
 		initUpdates: []revisionDestsUpdate{{
-			Rev:   types.NamespacedName{testNamespace, testRevision},
+			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			Dests: sets.NewString("128.0.0.1:1234"),
 		}, {
-			Rev:   types.NamespacedName{testNamespace, testRevision},
+			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			Dests: sets.NewString("128.0.0.1:1234"),
 		}},
 		requests:  1,
 		wantDests: sets.NewString("128.0.0.1:1234"),
 	}, {
 		name:     "single healthy podIP, infinite cc",
-		revision: revision(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1, 0),
+		revision: revision(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1, 0),
 		// Double updates exercise additional paths.
 		initUpdates: []revisionDestsUpdate{{
-			Rev:   types.NamespacedName{testNamespace, testRevision},
+			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			Dests: sets.NewString("128.0.0.2:1234"),
 		}, {
-			Rev:   types.NamespacedName{testNamespace, testRevision},
+			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			Dests: sets.NewString("128.0.0.1:1234"),
 		}},
 		requests:  1,
 		wantDests: sets.NewString("128.0.0.1:1234"),
 	}, {
 		name:     "single healthy clusterIP",
-		revision: revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1),
+		revision: revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1),
 		initUpdates: []revisionDestsUpdate{{
-			Rev:   types.NamespacedName{testNamespace, testRevision},
+			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			Dests: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234"),
 		}, {
-			Rev:           types.NamespacedName{testNamespace, testRevision},
+			Rev:           types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			ClusterIPDest: "129.0.0.1:1234",
 			Dests:         sets.NewString("128.0.0.1:1234"),
 		}},
@@ -343,31 +350,31 @@ func TestThrottlerSuccesses(t *testing.T) {
 		wantDests: sets.NewString("129.0.0.1:1234"),
 	}, {
 		name:     "spread podIP load",
-		revision: revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1),
+		revision: revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1),
 		initUpdates: []revisionDestsUpdate{{
-			// Double update here excercises some additional paths.
-			Rev:   types.NamespacedName{testNamespace, testRevision},
+			// Double update here exercises some additional paths.
+			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			Dests: sets.NewString("128.0.0.3:1234"),
 		}, {
-			Rev:   types.NamespacedName{testNamespace, testRevision},
+			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			Dests: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234"),
 		}},
 		requests:  2,
 		wantDests: sets.NewString("128.0.0.2:1234", "128.0.0.1:1234"),
 	}, {
 		name:     "clumping test",
-		revision: revision(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1, 3),
+		revision: revision(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1, 3),
 		initUpdates: []revisionDestsUpdate{{
-			Rev:   types.NamespacedName{testNamespace, testRevision},
+			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			Dests: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234"),
 		}},
 		requests:  3,
 		wantDests: sets.NewString("128.0.0.1:1234"),
 	}, {
 		name:     "multiple ClusterIP requests",
-		revision: revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1),
+		revision: revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1),
 		initUpdates: []revisionDestsUpdate{{
-			Rev:           types.NamespacedName{testNamespace, testRevision},
+			Rev:           types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			ClusterIPDest: "129.0.0.1:1234",
 			Dests:         sets.NewString("128.0.0.1:1234", "128.0.0.2:1234"),
 		}},
@@ -389,10 +396,11 @@ func TestThrottlerSuccesses(t *testing.T) {
 			}()
 
 			// Add the revision were testing.
-			servfake.ServingV1alpha1().Revisions(tc.revision.Namespace).Create(tc.revision)
+			servfake.ServingV1().Revisions(tc.revision.Namespace).Create(tc.revision)
 			revisions.Informer().GetIndexer().Add(tc.revision)
 
-			throttler := newTestThrottler(ctx, 1)
+			throttler, cleanup := newTestThrottler(ctx, 1)
+			defer cleanup()
 			for _, update := range tc.initUpdates {
 				throttler.handleUpdate(update)
 			}
@@ -430,12 +438,13 @@ func TestPodAssignmentFinite(t *testing.T) {
 	// An e2e verification test of pod assignment and capacity
 	// computations.
 	logger := TestLogger(t)
-	revName := types.NamespacedName{testNamespace, testRevision}
+	revName := types.NamespacedName{Namespace: testNamespace, Name: testRevision}
 
 	ctx, cancel, _ := rtesting.SetupFakeContextWithCancel(t)
 	defer cancel()
 
-	throttler := newTestThrottler(ctx, 4 /*num activators*/)
+	throttler, cleanup := newTestThrottler(ctx, 4 /*num activators*/)
+	defer cleanup()
 	rt := newRevisionThrottler(revName, 42 /*cc*/, defaultParams, logger)
 	throttler.revisionThrottlers[revName] = rt
 
@@ -482,12 +491,13 @@ func TestPodAssignmentFinite(t *testing.T) {
 
 func TestPodAssignmentInfinite(t *testing.T) {
 	logger := TestLogger(t)
-	revName := types.NamespacedName{testNamespace, testRevision}
+	revName := types.NamespacedName{Namespace: testNamespace, Name: testRevision}
 
 	ctx, cancel, _ := rtesting.SetupFakeContextWithCancel(t)
 	defer cancel()
 
-	throttler := newTestThrottler(ctx, 2)
+	throttler, cleanup := newTestThrottler(ctx, 2)
+	defer cleanup()
 	rt := newRevisionThrottler(revName, 0 /*cc*/, defaultParams, logger)
 	throttler.revisionThrottlers[revName] = rt
 
@@ -543,14 +553,14 @@ func TestMultipleActivators(t *testing.T) {
 		waitInformers()
 	}()
 
-	rev := revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1)
+	rev := revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1)
 	// Add the revision we're testing.
-	servfake.ServingV1alpha1().Revisions(rev.Namespace).Create(rev)
+	servfake.ServingV1().Revisions(rev.Namespace).Create(rev)
 	revisions.Informer().GetIndexer().Add(rev)
 
-	throttler := NewThrottler(ctx, defaultParams, "130.0.0.2:8012")
+	throttler := NewThrottler(ctx, "130.0.0.2:8012")
 
-	revID := types.NamespacedName{testNamespace, testRevision}
+	revID := types.NamespacedName{Namespace: testNamespace, Name: testRevision}
 	possibleDests := sets.NewString("128.0.0.1:1234", "128.0.0.2:1234", "128.0.0.23:1234")
 	throttler.handleUpdate(revisionDestsUpdate{
 		Rev:   revID,
@@ -563,7 +573,7 @@ func TestMultipleActivators(t *testing.T) {
 			Name:      networking.ActivatorServiceName,
 			Namespace: system.Namespace(),
 		},
-		Subsets: []corev1.EndpointSubset{*epSubset(8012, "http", []string{"130.0.0.1", "130.0.0.2"})},
+		Subsets: []corev1.EndpointSubset{*epSubset(8012, "http", []string{"130.0.0.1", "130.0.0.2"}, nil)},
 	}
 	fake.CoreV1().Endpoints(system.Namespace()).Create(activatorEp)
 	endpoints.Informer().GetIndexer().Add(activatorEp)
@@ -600,7 +610,7 @@ func TestMultipleActivators(t *testing.T) {
 
 func TestInfiniteBreakerCreation(t *testing.T) {
 	// This test verifies that we use infiniteBreaker when CC==0.
-	tttl := newRevisionThrottler(types.NamespacedName{"a", "b"}, 0, /*cc*/
+	tttl := newRevisionThrottler(types.NamespacedName{Namespace: "a", Name: "b"}, 0, /*cc*/
 		queue.BreakerParams{}, TestLogger(t))
 	if _, ok := tttl.breaker.(*infiniteBreaker); !ok {
 		t.Errorf("The type of revisionBreker = %T, want %T", tttl, (*infiniteBreaker)(nil))
@@ -610,10 +620,11 @@ func TestInfiniteBreakerCreation(t *testing.T) {
 func tryThrottler(throttler *Throttler, ctx context.Context, requests int, try func(string) error) chan tryResult {
 	resultChan := make(chan tryResult)
 
+	ctx = util.WithRevID(ctx, types.NamespacedName{Namespace: testNamespace, Name: testRevision})
 	for i := 0; i < requests; i++ {
 		go func() {
 			var result tryResult
-			if err := throttler.Try(ctx, types.NamespacedName{Namespace: testNamespace, Name: testRevision}, func(dest string) error {
+			if err := throttler.Try(ctx, func(dest string) error {
 				result = tryResult{dest: dest}
 				return try(dest)
 			}); err != nil {

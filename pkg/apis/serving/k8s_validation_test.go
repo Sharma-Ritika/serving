@@ -90,7 +90,7 @@ func TestPodSpecValidation(t *testing.T) {
 			}},
 		},
 		want: (&apis.FieldError{
-			Message: fmt.Sprintf(`duplicate volume name "the-name"`),
+			Message: `duplicate volume name "the-name"`,
 			Paths:   []string{"name"},
 		}).ViaFieldIndex("volumes", 1),
 	}, {
@@ -218,7 +218,7 @@ func TestContainerValidation(t *testing.T) {
 		want: &apis.FieldError{
 			Message: "Failed to parse image reference",
 			Paths:   []string{"image"},
-			Details: "image: \"foo:bar:baz\", error: could not parse reference",
+			Details: "image: \"foo:bar:baz\", error: could not parse reference: foo:bar:baz",
 		},
 	}, {
 		name: "has a lifecycle",

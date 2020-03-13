@@ -94,8 +94,7 @@ func NewStats(startedAt time.Time, reqCh chan ReqEvent, reportCh <-chan time.Tim
 				// Reset the stat counts which have been reported.
 				timeOnConcurrency = map[int]time.Duration{}
 				timeOnProxiedConcurrency = map[int]time.Duration{}
-				requestCount = 0
-				proxiedCount = 0
+				requestCount, proxiedCount = 0, 0
 			}
 		}
 	}()
@@ -103,7 +102,7 @@ func NewStats(startedAt time.Time, reqCh chan ReqEvent, reportCh <-chan time.Tim
 
 func weightedAverage(times map[int]time.Duration) float64 {
 	// The sum of times cannot be 0, since `updateState` above only
-	// pemits positive durations.
+	// permits positive durations.
 	if len(times) == 0 {
 		return 0
 	}

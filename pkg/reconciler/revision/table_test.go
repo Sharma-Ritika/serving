@@ -27,24 +27,27 @@ import (
 	clientgotesting "k8s.io/client-go/testing"
 
 	caching "knative.dev/caching/pkg/apis/caching/v1alpha1"
+	cachingclient "knative.dev/caching/pkg/client/injection/client"
+	kubeclient "knative.dev/pkg/client/injection/kube/client"
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/metrics"
+	pkgreconciler "knative.dev/pkg/reconciler"
 	tracingconfig "knative.dev/pkg/tracing/config"
 	asv1a1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/apis/networking"
 	v1 "knative.dev/serving/pkg/apis/serving/v1"
-	"knative.dev/serving/pkg/apis/serving/v1alpha1"
-	"knative.dev/serving/pkg/network"
-	"knative.dev/serving/pkg/reconciler"
+	autoscalerconfig "knative.dev/serving/pkg/autoscaler/config"
+	servingclient "knative.dev/serving/pkg/client/injection/client"
+	revisionreconciler "knative.dev/serving/pkg/client/injection/reconciler/serving/v1/revision"
 	"knative.dev/serving/pkg/reconciler/revision/config"
 	"knative.dev/serving/pkg/reconciler/revision/resources"
 
 	. "knative.dev/pkg/reconciler/testing"
-	. "knative.dev/serving/pkg/reconciler/testing/v1alpha1"
+	. "knative.dev/serving/pkg/reconciler/testing/v1"
 	. "knative.dev/serving/pkg/testing"
-	. "knative.dev/serving/pkg/testing/v1alpha1"
+	. "knative.dev/serving/pkg/testing/v1"
 )
 
 // This is heavily based on the way the OpenShift Ingress controller tests its reconciliation method.
@@ -68,7 +71,7 @@ func TestReconcile(t *testing.T) {
 		Name: "first revision reconciliation",
 		// Test the simplest successful reconciliation flow.
 		// We feed in a well formed Revision where none of its sub-resources exist,
-		// and we exect it to create them and initialize the Revision's status.
+		// and we expect it to create them and initialize the Revision's status.
 		Objects: []runtime.Object{
 			rev("foo", "first-reconcile"),
 		},
@@ -107,7 +110,7 @@ func TestReconcile(t *testing.T) {
 				WithLogURL, AllUnknownConditions, MarkDeploying("Deploying")),
 		}},
 		WantEvents: []string{
-			Eventf(corev1.EventTypeWarning, "UpdateFailed", "Failed to update status for Revision %q: %v",
+			Eventf(corev1.EventTypeWarning, "UpdateFailed", "Failed to update status for %q: %v",
 				"update-status-failure", "inducing failure for update revisions"),
 		},
 		Key: "foo/update-status-failure",
@@ -180,29 +183,6 @@ func TestReconcile(t *testing.T) {
 		},
 		// No changes are made to any objects.
 		Key: "foo/stable-reconcile",
-	}, {
-		Name: "stable revision reconciliation (needs upgrade)",
-		// Test a simple reconciliation of a steady state in a pre-beta form,
-		// which should result in us patching the revision with an annotation
-		// to force a webhook upgrade.
-		Objects: []runtime.Object{
-			rev("foo", "needs-upgrade", WithLogURL, AllUnknownConditions, func(rev *v1alpha1.Revision) {
-				// Start the revision in the old form.
-				rev.Spec.DeprecatedContainer = &rev.Spec.Containers[0]
-				rev.Spec.Containers = nil
-			}),
-			pa("foo", "needs-upgrade", WithReachability(asv1a1.ReachabilityUnknown)),
-			deploy(t, "foo", "needs-upgrade"),
-			image("foo", "needs-upgrade"),
-		},
-		WantPatches: []clientgotesting.PatchActionImpl{{
-			ActionImpl: clientgotesting.ActionImpl{
-				Namespace: "foo",
-			},
-			Name:  "needs-upgrade",
-			Patch: []byte(reconciler.ForceUpgradePatch),
-		}},
-		Key: "foo/needs-upgrade",
 	}, {
 		Name: "update deployment containers",
 		// Test that we update a deployment with new containers when they disagree
@@ -320,7 +300,7 @@ func TestReconcile(t *testing.T) {
 	}, {
 		Name: "pa inactive, but has service",
 		// Test propagating the inactivity signal from the pa to the Revision.
-		// But propagatethe service name.
+		// But propagate the service name.
 		Objects: []runtime.Object{
 			rev("foo", "pa-inactive",
 				withK8sServiceName("here-comes-the-sun"), WithLogURL, MarkRevisionReady),
@@ -465,7 +445,7 @@ func TestReconcile(t *testing.T) {
 		},
 		WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 			Object: rev("foo", "pod-error",
-				WithLogURL, AllUnknownConditions, MarkContainerExiting(5, v1alpha1.RevisionContainerExitingMessage("I failed man!"))),
+				WithLogURL, AllUnknownConditions, MarkContainerExiting(5, v1.RevisionContainerExitingMessage("I failed man!"))),
 		}},
 		Key: "foo/pod-error",
 	}, {
@@ -489,7 +469,7 @@ func TestReconcile(t *testing.T) {
 	}, {
 		Name: "ready steady state",
 		// Test the transition that Reconcile makes when Endpoints become ready on the
-		// SKS owned services, which is signalled by pa having servince name.
+		// SKS owned services, which is signalled by pa having service name.
 		// This puts the world into the stable post-reconcile state for an Active
 		// Revision.  It then creates an Endpoints resource with active subsets.
 		// This signal should make our Reconcile mark the Revision as Ready.
@@ -569,17 +549,21 @@ func TestReconcile(t *testing.T) {
 	}}
 
 	table.Test(t, MakeFactory(func(ctx context.Context, listers *Listers, cmw configmap.Watcher) controller.Reconciler {
-		return &Reconciler{
-			Base:                reconciler.NewBase(ctx, controllerAgentName, cmw),
-			revisionLister:      listers.GetRevisionLister(),
+		r := &Reconciler{
+			kubeclient:    kubeclient.Get(ctx),
+			client:        servingclient.Get(ctx),
+			cachingclient: cachingclient.Get(ctx),
+
 			podAutoscalerLister: listers.GetPodAutoscalerLister(),
 			imageLister:         listers.GetImageLister(),
 			deploymentLister:    listers.GetDeploymentLister(),
 			serviceLister:       listers.GetK8sServiceLister(),
-			configMapLister:     listers.GetConfigMapLister(),
 			resolver:            &nopResolver{},
-			configStore:         &testConfigStore{config: ReconcilerTestConfig()},
 		}
+
+		return revisionreconciler.NewReconciler(ctx, logging.FromContext(ctx), servingclient.Get(ctx),
+			listers.GetRevisionLister(), controller.GetEventRecorder(ctx), r,
+			controller.Options{ConfigStore: &testConfigStore{config: ReconcilerTestConfig()}})
 	}))
 }
 
@@ -638,20 +622,18 @@ func changeContainers(deploy *appsv1.Deployment) *appsv1.Deployment {
 	return deploy
 }
 
-func rev(namespace, name string, ro ...RevisionOption) *v1alpha1.Revision {
-	r := &v1alpha1.Revision{
+func rev(namespace, name string, ro ...RevisionOption) *v1.Revision {
+	r := &v1.Revision{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 			UID:       "test-uid",
 		},
-		Spec: v1alpha1.RevisionSpec{
-			RevisionSpec: v1.RevisionSpec{
-				PodSpec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Image: "busybox",
-					}},
-				},
+		Spec: v1.RevisionSpec{
+			PodSpec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Image: "busybox",
+				}},
 			},
 		},
 	}
@@ -664,13 +646,13 @@ func rev(namespace, name string, ro ...RevisionOption) *v1alpha1.Revision {
 }
 
 func withK8sServiceName(sn string) RevisionOption {
-	return func(r *v1alpha1.Revision) {
+	return func(r *v1.Revision) {
 		r.Status.ServiceName = sn
 	}
 }
 
 // TODO(mattmoor): Come up with a better name for this.
-func AllUnknownConditions(r *v1alpha1.Revision) {
+func AllUnknownConditions(r *v1.Revision) {
 	WithInitRevConditions(r)
 	MarkDeploying("")(r)
 	MarkActivating("Deploying", "")(r)
@@ -700,7 +682,7 @@ func deploy(t *testing.T, namespace, name string, opts ...interface{}) *appsv1.D
 	// before calling MakeDeployment within Reconcile.
 	rev.SetDefaults(context.Background())
 	deployment, err := resources.MakeDeployment(rev, cfg.Logging, cfg.Tracing, cfg.Network,
-		cfg.Observability, cfg.Deployment,
+		cfg.Observability, cfg.Autoscaler, cfg.Deployment,
 	)
 
 	if err != nil {
@@ -754,16 +736,16 @@ func (t *testConfigStore) ToContext(ctx context.Context) context.Context {
 	return config.ToContext(ctx, t.config)
 }
 
-var _ reconciler.ConfigStore = (*testConfigStore)(nil)
+var _ pkgreconciler.ConfigStore = (*testConfigStore)(nil)
 
 func ReconcilerTestConfig() *config.Config {
 	return &config.Config{
 		Deployment: getTestDeploymentConfig(),
-		Network:    &network.Config{IstioOutboundIPRanges: "*"},
 		Observability: &metrics.ObservabilityConfig{
 			LoggingURLTemplate: "http://logger.io/${REVISION_UID}",
 		},
-		Logging: &logging.Config{},
-		Tracing: &tracingconfig.Config{},
+		Logging:    &logging.Config{},
+		Tracing:    &tracingconfig.Config{},
+		Autoscaler: &autoscalerconfig.Config{},
 	}
 }

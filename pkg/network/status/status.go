@@ -32,7 +32,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/workqueue"
 
 	"knative.dev/pkg/network/prober"
@@ -44,10 +43,6 @@ import (
 const (
 	// probeConcurrency defines how many probing calls can be issued simultaneously
 	probeConcurrency = 15
-	// stateExpiration defines how long after being last accessed a state expires
-	stateExpiration = 5 * time.Minute
-	// cleanupPeriod defines how often states are cleaned up
-	cleanupPeriod = 1 * time.Minute
 	//probeTimeout defines the maximum amount of time a request will wait
 	probeTimeout = 1 * time.Second
 )
@@ -125,8 +120,6 @@ type Prober struct {
 	readyCallback func(*v1alpha1.Ingress)
 
 	probeConcurrency int
-	stateExpiration  time.Duration
-	cleanupPeriod    time.Duration
 }
 
 // NewProber creates a new instance of Prober
@@ -144,8 +137,6 @@ func NewProber(
 		targetLister:     targetLister,
 		readyCallback:    readyCallback,
 		probeConcurrency: probeConcurrency,
-		stateExpiration:  stateExpiration,
-		cleanupPeriod:    cleanupPeriod,
 	}
 }
 
@@ -287,13 +278,6 @@ func (m *Prober) Start(done <-chan struct{}) chan struct{} {
 		}()
 	}
 
-	// Cleanup the states periodically
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		wait.Until(m.expireOldStates, m.cleanupPeriod, done)
-	}()
-
 	// Stop processing the queue when cancelled
 	go func() {
 		<-done
@@ -326,7 +310,7 @@ func (m *Prober) CancelIngressProbing(obj interface{}) {
 
 // CancelPodProbing cancels probing of the provided Pod IP.
 //
-// TODO(#6269): make this cancelation based on Pod x port instead of just Pod.
+// TODO(#6269): make this cancellation based on Pod x port instead of just Pod.
 func (m *Prober) CancelPodProbing(obj interface{}) {
 	if pod, ok := obj.(*corev1.Pod); ok {
 		m.mu.Lock()
@@ -335,18 +319,6 @@ func (m *Prober) CancelPodProbing(obj interface{}) {
 		if ctx, ok := m.podContexts[pod.Status.PodIP]; ok {
 			ctx.cancel()
 			delete(m.podContexts, pod.Status.PodIP)
-		}
-	}
-}
-
-// expireOldStates removes the states that haven't been accessed in a while.
-func (m *Prober) expireOldStates() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for key, state := range m.ingressStates {
-		if time.Since(state.lastAccessed) > m.stateExpiration {
-			state.cancel()
-			delete(m.ingressStates, key)
 		}
 	}
 }
@@ -388,9 +360,9 @@ func (m *Prober) processWorkItem() bool {
 		item.context,
 		transport,
 		item.url.String(),
+		prober.WithHeader(network.UserAgentKey, network.IngressReadinessUserAgent),
 		prober.WithHeader(network.ProbeHeaderName, network.ProbeHeaderValue),
-		prober.ExpectsStatusCodes([]int{http.StatusOK}),
-		prober.ExpectsHeader(network.HashHeaderName, item.ingressState.hash))
+		m.probeVerifier(item))
 
 	// In case of cancellation, drop the work item
 	select {
@@ -419,6 +391,40 @@ func (m *Prober) updateStates(ingressState *ingressState, podState *podState) {
 		// This is the last pod being successfully probed, the Ingress is ready
 		if atomic.AddInt32(&ingressState.pendingCount, -1) == 0 {
 			m.readyCallback(ingressState.ing)
+		}
+	}
+}
+
+func (m *Prober) probeVerifier(item *workItem) prober.Verifier {
+	return func(r *http.Response, _ []byte) (bool, error) {
+		// In the happy path, the probe request is forwarded to Activator or Queue-Proxy and the response (HTTP 200)
+		// contains the "K-Network-Hash" header that can be compared with the expected hash. If the hashes match,
+		// probing is successful, if they don't match, a new probe will be sent later.
+		// An HTTP 404/503 is expected in the case of the creation of a new Knative service because the rules will
+		// not be present in the Envoy config until the new VirtualService is applied.
+		// No information can be extracted from any other scenario (e.g. HTTP 302), therefore in that case,
+		// probing is assumed to be successful because it is better to say that an Ingress is Ready before it
+		// actually is Ready than never marking it as Ready. It is best effort.
+		switch r.StatusCode {
+		case http.StatusOK:
+			hash := r.Header.Get(network.HashHeaderName)
+			switch hash {
+			case "":
+				m.logger.Errorf("Probing of %s abandoned, IP: %s:%s: the response doesn't contain the %q header",
+					item.url, item.podIP, item.podPort, network.HashHeaderName)
+				return true, nil
+			case item.ingressState.hash:
+				return true, nil
+			default:
+				return false, fmt.Errorf("unexpected hash: want %q, got %q", item.ingressState.hash, hash)
+			}
+			return false, fmt.Errorf("unexpected hash: want %q, got %q", item.ingressState.hash, hash)
+		case http.StatusNotFound, http.StatusServiceUnavailable:
+			return false, fmt.Errorf("unexpected status code: want %v, got %v", http.StatusOK, http.StatusNotFound)
+		default:
+			m.logger.Errorf("Probing of %s abandoned, IP: %s:%s: the response status is %v, expected 200 or 404",
+				item.url, item.podIP, item.podPort, r.StatusCode)
+			return true, nil
 		}
 	}
 }

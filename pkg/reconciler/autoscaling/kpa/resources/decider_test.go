@@ -27,7 +27,8 @@ import (
 
 	"knative.dev/serving/pkg/apis/autoscaling"
 	"knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
-	"knative.dev/serving/pkg/autoscaler"
+	autoscalerconfig "knative.dev/serving/pkg/autoscaler/config"
+	"knative.dev/serving/pkg/autoscaler/scaling"
 	. "knative.dev/serving/pkg/testing"
 )
 
@@ -36,8 +37,8 @@ func TestMakeDecider(t *testing.T) {
 		name   string
 		pa     *v1alpha1.PodAutoscaler
 		svc    string
-		want   *autoscaler.Decider
-		cfgOpt func(autoscaler.Config) *autoscaler.Config
+		want   *scaling.Decider
+		cfgOpt func(autoscalerconfig.Config) *autoscalerconfig.Config
 	}{{
 		name: "defaults",
 		pa:   pa(),
@@ -46,7 +47,7 @@ func TestMakeDecider(t *testing.T) {
 		name: "tu < 1", // See #4449 why Target=100
 		pa:   pa(),
 		want: decider(withTarget(80), withPanicThreshold(160.0), withTotal(100)),
-		cfgOpt: func(c autoscaler.Config) *autoscaler.Config {
+		cfgOpt: func(c autoscalerconfig.Config) *autoscalerconfig.Config {
 			c.ContainerConcurrencyTargetFraction = 0.8
 			return &c
 		},
@@ -55,7 +56,7 @@ func TestMakeDecider(t *testing.T) {
 		pa:   pa(),
 		want: decider(withTarget(100.0), withPanicThreshold(200.0), withTotal(100),
 			withScaleUpDownRates(19.84, 19.88)),
-		cfgOpt: func(c autoscaler.Config) *autoscaler.Config {
+		cfgOpt: func(c autoscalerconfig.Config) *autoscalerconfig.Config {
 			c.MaxScaleUpRate = 19.84
 			c.MaxScaleDownRate = 19.88
 			return &c
@@ -72,7 +73,7 @@ func TestMakeDecider(t *testing.T) {
 		name: "with container concurrency and tu < 1",
 		pa:   pa(WithPAContainerConcurrency(100)),
 		want: decider(withTarget(80), withTotal(100), withPanicThreshold(160)), // PanicThreshold depends on TCC.
-		cfgOpt: func(c autoscaler.Config) *autoscaler.Config {
+		cfgOpt: func(c autoscalerconfig.Config) *autoscalerconfig.Config {
 			c.ContainerConcurrencyTargetFraction = 0.8
 			return &c
 		},
@@ -80,7 +81,7 @@ func TestMakeDecider(t *testing.T) {
 		name: "with burst capacity set",
 		pa:   pa(WithPAContainerConcurrency(120)),
 		want: decider(withTarget(96), withTotal(120), withPanicThreshold(192), withTargetBurstCapacity(63)),
-		cfgOpt: func(c autoscaler.Config) *autoscaler.Config {
+		cfgOpt: func(c autoscalerconfig.Config) *autoscalerconfig.Config {
 			c.TargetBurstCapacity = 63
 			c.ContainerConcurrencyTargetFraction = 0.8
 			return &c
@@ -90,7 +91,7 @@ func TestMakeDecider(t *testing.T) {
 		pa:   pa(WithPAContainerConcurrency(120), withTBCAnnotation("211")),
 		want: decider(withTarget(96), withTotal(120), withPanicThreshold(192),
 			withDeciderTBCAnnotation("211"), withTargetBurstCapacity(211)),
-		cfgOpt: func(c autoscaler.Config) *autoscaler.Config {
+		cfgOpt: func(c autoscalerconfig.Config) *autoscalerconfig.Config {
 			c.TargetBurstCapacity = 63
 			c.ContainerConcurrencyTargetFraction = 0.8
 			return &c
@@ -165,13 +166,13 @@ func withTBCAnnotation(tbc string) PodAutoscalerOption {
 }
 
 func withDeciderTBCAnnotation(tbc string) deciderOption {
-	return func(d *autoscaler.Decider) {
+	return func(d *scaling.Decider) {
 		d.Annotations[autoscaling.TargetBurstCapacityKey] = tbc
 	}
 }
 
-func decider(options ...deciderOption) *autoscaler.Decider {
-	m := &autoscaler.Decider{
+func decider(options ...deciderOption) *scaling.Decider {
+	m := &scaling.Decider{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "test-namespace",
 			Name:      "test-name",
@@ -180,7 +181,7 @@ func decider(options ...deciderOption) *autoscaler.Decider {
 				autoscaling.MetricAnnotationKey: autoscaling.Concurrency,
 			},
 		},
-		Spec: autoscaler.DeciderSpec{
+		Spec: scaling.DeciderSpec{
 			MaxScaleUpRate:      config.MaxScaleUpRate,
 			TickInterval:        config.TickInterval,
 			ScalingMetric:       "concurrency",
@@ -197,70 +198,70 @@ func decider(options ...deciderOption) *autoscaler.Decider {
 	return m
 }
 
-type deciderOption func(*autoscaler.Decider)
+type deciderOption func(*scaling.Decider)
 
 func withMetric(metric string) deciderOption {
-	return func(decider *autoscaler.Decider) {
+	return func(decider *scaling.Decider) {
 		decider.Spec.ScalingMetric = metric
 	}
 }
 
 func withTargetBurstCapacity(tbc float64) deciderOption {
-	return func(decider *autoscaler.Decider) {
+	return func(decider *scaling.Decider) {
 		decider.Spec.TargetBurstCapacity = tbc
 	}
 }
 
 func withScaleUpDownRates(up, down float64) deciderOption {
-	return func(decider *autoscaler.Decider) {
+	return func(decider *scaling.Decider) {
 		decider.Spec.MaxScaleUpRate = up
 		decider.Spec.MaxScaleDownRate = down
 	}
 }
 
 func withTotal(total float64) deciderOption {
-	return func(decider *autoscaler.Decider) {
+	return func(decider *scaling.Decider) {
 		decider.Spec.TotalValue = total
 	}
 }
 
 func withTarget(target float64) deciderOption {
-	return func(decider *autoscaler.Decider) {
+	return func(decider *scaling.Decider) {
 		decider.Spec.TargetValue = target
 	}
 }
 
 func withService(s string) deciderOption {
-	return func(d *autoscaler.Decider) {
+	return func(d *scaling.Decider) {
 		d.Spec.ServiceName = s
 	}
 }
 
 func withPanicThreshold(threshold float64) deciderOption {
-	return func(decider *autoscaler.Decider) {
+	return func(decider *scaling.Decider) {
 		decider.Spec.PanicThreshold = threshold
 	}
 }
 
 func withTargetAnnotation(target string) deciderOption {
-	return func(decider *autoscaler.Decider) {
+	return func(decider *scaling.Decider) {
 		decider.Annotations[autoscaling.TargetAnnotationKey] = target
 	}
 }
 
 func withMetricAnnotation(metric string) deciderOption {
-	return func(decider *autoscaler.Decider) {
+	return func(decider *scaling.Decider) {
 		decider.Annotations[autoscaling.MetricAnnotationKey] = metric
 	}
 }
 
 func withPanicThresholdPercentageAnnotation(percentage string) deciderOption {
-	return func(decider *autoscaler.Decider) {
+	return func(decider *scaling.Decider) {
 		decider.Annotations[autoscaling.PanicThresholdPercentageAnnotationKey] = percentage
 	}
 }
 
-var config = &autoscaler.Config{
+var config = &autoscalerconfig.Config{
 	EnableScaleToZero:                  true,
 	ContainerConcurrencyTargetFraction: 1.0,
 	ContainerConcurrencyTargetDefault:  100.0,

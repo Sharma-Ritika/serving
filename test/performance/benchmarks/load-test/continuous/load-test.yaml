@@ -17,21 +17,6 @@ kind: ServiceAccount
 metadata:
   name: loader
 ---
-kind: ClusterRole
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: load-testing
-rules:
-  - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list"]
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["networking.internal.knative.dev"]
-    resources: ["serverlessservices"]
-    verbs: ["get", "list", "watch"]
----
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -42,7 +27,7 @@ subjects:
     namespace: default
 roleRef:
   kind: ClusterRole
-  name: load-testing
+  name: cluster-admin
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: batch/v1beta1
@@ -59,7 +44,7 @@ spec:
           serviceAccountName: loader
           containers:
           - name: load-test
-            image: knative.dev/serving/test/performance/benchmarks/load-test/continuous
+            image: ko://knative.dev/serving/test/performance/benchmarks/load-test/continuous
             args:
             - "-flavor=zero"
             resources:
@@ -103,7 +88,7 @@ spec:
           serviceAccountName: loader
           containers:
           - name: load-test
-            image: knative.dev/serving/test/performance/benchmarks/load-test/continuous
+            image: ko://knative.dev/serving/test/performance/benchmarks/load-test/continuous
             args:
             - "-flavor=always"
             resources:
@@ -147,7 +132,7 @@ spec:
           serviceAccountName: loader
           containers:
           - name: load-test
-            image: knative.dev/serving/test/performance/benchmarks/load-test/continuous
+            image: ko://knative.dev/serving/test/performance/benchmarks/load-test/continuous
             args:
             - "-flavor=200"
             resources:

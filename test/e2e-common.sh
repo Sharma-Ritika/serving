@@ -20,18 +20,20 @@
 # with the job config.
 E2E_MIN_CLUSTER_NODES=${E2E_MIN_CLUSTER_NODES:-4}
 E2E_MAX_CLUSTER_NODES=${E2E_MAX_CLUSTER_NODES:-4}
-E2E_CLUSTER_MACHINE=${E2E_CLUSTER_MACHINE:-n1-standard-8}
+E2E_CLUSTER_MACHINE=${E2E_CLUSTER_MACHINE:-e2-standard-8}
 
 # This script provides helper methods to perform cluster actions.
 source $(dirname $0)/../vendor/knative.dev/test-infra/scripts/e2e-tests.sh
 
 CERT_MANAGER_VERSION="0.12.0"
+# Since default is istio, make default ingress as istio
+INGRESS_CLASS=${INGRESS_CLASS:-istio.ingress.networking.knative.dev}
 ISTIO_VERSION=""
 GLOO_VERSION=""
 KOURIER_VERSION=""
 AMBASSADOR_VERSION=""
 CONTOUR_VERSION=""
-INGRESS_CLASS=""
+CERTIFICATE_CLASS=""
 
 HTTPS=0
 MESH=0
@@ -59,6 +61,7 @@ function parse_flags() {
     --cert-manager-version)
       [[ $2 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || abort "version format must be '[0-9].[0-9].[0-9]'"
       readonly CERT_MANAGER_VERSION=$2
+      readonly CERTIFICATE_CLASS="cert-manager.certificate.networking.knative.dev"
       return 2
       ;;
     --mesh)
@@ -158,7 +161,7 @@ function install_istio() {
   # If no gateway was set on command line, assume Istio
   if [[ -z "${ISTIO_VERSION}" ]]; then
     echo ">> No gateway set up on command line, using Istio"
-    readonly ISTIO_VERSION="1.4-latest"
+    readonly ISTIO_VERSION="1.5-latest"
   fi
 
   local istio_base="./third_party/istio-${ISTIO_VERSION}"
@@ -256,11 +259,19 @@ function install_ambassador() {
 
 function install_contour() {
   local INSTALL_CONTOUR_YAML="./third_party/contour-latest/contour.yaml"
+  local INSTALL_NET_CONTOUR_YAML="./third_party/contour-latest/net-contour.yaml"
   echo "Contour YAML: ${INSTALL_CONTOUR_YAML}"
-  echo ">> Bringing up Contour"
+  echo "Contour KIngress YAML: ${INSTALL_NET_CONTOUR_YAML}"
 
+  echo ">> Bringing up Contour"
   kubectl apply -f ${INSTALL_CONTOUR_YAML} || return 1
+
   UNINSTALL_LIST+=( "${INSTALL_CONTOUR_YAML}" )
+
+  echo ">> Bringing up net-contour"
+  kubectl apply -f ${INSTALL_NET_CONTOUR_YAML} || return 1
+
+  UNINSTALL_LIST+=( "${INSTALL_NET_CONTOUR_YAML}" )
 }
 
 # Installs Knative Serving in the current cluster, and waits for it to be ready.
@@ -285,20 +296,19 @@ function install_knative_serving_standard() {
     echo "Knative YAML: ${1}"
     ko apply -f "${1}" --selector=knative.dev/crd-install=true || return 1
     UNINSTALL_LIST+=( "${1}" )
-    SERVING_ISTIO_YAML="${1}"
   fi
 
   echo ">> Installing Ingress"
   if [[ -n "${GLOO_VERSION}" ]]; then
-    install_gloo
+    install_gloo || return 1
   elif [[ -n "${KOURIER_VERSION}" ]]; then
-    install_kourier
+    install_kourier || return 1
   elif [[ -n "${AMBASSADOR_VERSION}" ]]; then
-    install_ambassador
+    install_ambassador || return 1
   elif [[ -n "${CONTOUR_VERSION}" ]]; then
-    install_contour
+    install_contour || return 1
   else
-    install_istio "${SERVING_ISTIO_YAML}"
+    install_istio "./third_party/net-istio.yaml" || return 1
   fi
 
   echo ">> Installing Cert-Manager"
@@ -314,12 +324,11 @@ function install_knative_serving_standard() {
 	    -f "${SERVING_HPA_YAML}" || return 1
     UNINSTALL_LIST+=( "${SERVING_CORE_YAML}" "${SERVING_HPA_YAML}" )
 
-    # ${SERVING_CERT_MANAGER_YAML} and ${SERVING_NSCERT_YAML} are set when calling
+    # ${SERVING_CERT_MANAGER_YAML} is set when calling
     # build_knative_from_source
-    echo "Knative TLS YAML: ${SERVING_CERT_MANAGER_YAML} and ${SERVING_NSCERT_YAML}"
+    echo "Knative TLS YAML: ${SERVING_CERT_MANAGER_YAML}"
     kubectl apply \
-      -f "${SERVING_CERT_MANAGER_YAML}" \
-      -f "${SERVING_NSCERT_YAML}" || return 1
+      -f "${SERVING_CERT_MANAGER_YAML}" || return 1
 
     if (( INSTALL_MONITORING )); then
 	echo ">> Installing Monitoring"
@@ -379,21 +388,21 @@ function use_resolvable_domain() {
   echo "false"
 }
 
-# Check if we should use --https.
-function use_https() {
-  if (( HTTPS )); then
-    echo "--https"
-  else
-    echo ""
-  fi
-}
-
 # Check if we should specify --ingressClass
 function ingress_class() {
   if [[ -z "${INGRESS_CLASS}" ]]; then
     echo ""
   else
     echo "--ingressClass=${INGRESS_CLASS}"
+  fi
+}
+
+# Check if we should specify --certificateClass
+function certificate_class() {
+  if [[ -z "${CERTIFICATE_CLASS}" ]]; then
+    echo ""
+  else
+    echo "--certificateClass=${CERTIFICATE_CLASS}"
   fi
 }
 
@@ -420,6 +429,20 @@ function knative_teardown() {
   fi
 }
 
+# Add function call to trap
+# Parameters: $1 - Function to call
+#             $2...$n - Signals for trap
+function add_trap() {
+  local cmd=$1
+  shift
+  for trap_signal in $@; do
+    local current_trap="$(trap -p $trap_signal | cut -d\' -f2)"
+    local new_cmd="($cmd)"
+    [[ -n "${current_trap}" ]] && new_cmd="${current_trap};${new_cmd}"
+    trap -- "${new_cmd}" $trap_signal
+  done
+}
+
 # Create test resources and images
 function test_setup() {
   echo ">> Setting up logging..."
@@ -433,14 +456,15 @@ function test_setup() {
   kail > ${ARTIFACTS}/k8s.log.txt &
   local kail_pid=$!
   # Clean up kail so it doesn't interfere with job shutting down
-  trap "kill $kail_pid || true" EXIT
+  add_trap "kill $kail_pid || true" EXIT
 
   echo ">> Creating test resources (test/config/)"
   ko apply ${KO_FLAGS} -f test/config/ || return 1
   if (( MESH )); then
     kubectl label namespace serving-tests istio-injection=enabled
     kubectl label namespace serving-tests-alt istio-injection=enabled
-    ko apply ${KO_FLAGS} -f test/config/mtls/ || return 1
+    kubectl label namespace serving-tests-security istio-injection=enabled
+    ko apply ${KO_FLAGS} -f test/config/security/ || return 1
   fi
 
   echo ">> Uploading test images..."
@@ -448,6 +472,9 @@ function test_setup() {
 
   echo ">> Waiting for Serving components to be running..."
   wait_until_pods_running knative-serving || return 1
+
+  echo ">> Waiting for Cert Manager components to be running..."
+  wait_until_pods_running cert-manager || return 1
 
   echo ">> Waiting for Ingress provider to be running..."
   if [[ -n "${ISTIO_VERSION}" ]]; then
@@ -465,10 +492,10 @@ function test_setup() {
   if [[ -n "${KOURIER_VERSION}" ]]; then
     # we must set these override values to allow the test spoofing client to work with Kourier
     # see https://github.com/knative/pkg/blob/release-0.7/test/ingress/ingress.go#L37
-    export GATEWAY_OVERRIDE=kourier-external
+    export GATEWAY_OVERRIDE=kourier
     export GATEWAY_NAMESPACE_OVERRIDE=kourier-system
     wait_until_pods_running kourier-system || return 1
-    wait_until_service_has_external_ip kourier-system kourier-external
+    wait_until_service_has_external_ip kourier-system kourier
   fi
   if [[ -n "${AMBASSADOR_VERSION}" ]]; then
     # we must set these override values to allow the test spoofing client to work with Ambassador
@@ -481,10 +508,11 @@ function test_setup() {
   if [[ -n "${CONTOUR_VERSION}" ]]; then
     # we must set these override values to allow the test spoofing client to work with Contour
     # see https://github.com/knative/pkg/blob/release-0.7/test/ingress/ingress.go#L37
-    export GATEWAY_OVERRIDE=envoy-external
-    export GATEWAY_NAMESPACE_OVERRIDE=projectcontour
-    wait_until_pods_running projectcontour || return 1
-    wait_until_service_has_external_ip projectcontour envoy-external
+    export GATEWAY_OVERRIDE=envoy
+    export GATEWAY_NAMESPACE_OVERRIDE=contour-external
+    wait_until_pods_running contour-external || return 1
+    wait_until_pods_running contour-internal || return 1
+    wait_until_service_has_external_ip "${GATEWAY_NAMESPACE_OVERRIDE}" "${GATEWAY_OVERRIDE}"
   fi
 
   if (( INSTALL_MONITORING )); then
@@ -498,13 +526,15 @@ function test_teardown() {
   echo ">> Removing test resources (test/config/)"
   ko delete --ignore-not-found=true --now -f test/config/
   if (( MESH )); then
-    ko delete --ignore-not-found=true --now -f test/config/mtls/
+    ko delete --ignore-not-found=true --now -f test/config/security/
   fi
   echo ">> Ensuring test namespaces are clean"
   kubectl delete all --all --ignore-not-found --now --timeout 60s -n serving-tests
   kubectl delete --ignore-not-found --now --timeout 60s namespace serving-tests
   kubectl delete all --all --ignore-not-found --now --timeout 60s -n serving-tests-alt
   kubectl delete --ignore-not-found --now --timeout 60s namespace serving-tests-alt
+  kubectl delete all --all --ignore-not-found --now --timeout 60s -n serving-tests-security
+  kubectl delete --ignore-not-found --now --timeout 60s namespace serving-tests-security
 }
 
 # Dump more information when test fails.

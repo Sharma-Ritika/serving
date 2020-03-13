@@ -17,11 +17,13 @@ limitations under the License.
 package readiness
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -51,7 +53,7 @@ func TestNewProbe(t *testing.T) {
 		t.Errorf("NewProbe (-want, +got) = %v", diff)
 	}
 
-	if c := p.Count(); c != 0 {
+	if c := p.count; c != 0 {
 		t.Errorf("Expected Probe.Count == 0, got: %d", c)
 	}
 }
@@ -214,6 +216,52 @@ func TestHTTPSuccess(t *testing.T) {
 
 	if !pb.ProbeContainer() {
 		t.Error("Probe failed. Expected success.")
+	}
+}
+
+func TestHTTPManyParallel(t *testing.T) {
+	cnt := int32(0)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&cnt, 1)
+	}))
+	defer ts.Close()
+
+	tsURL, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatalf("Failed to parse URL %s: %v", ts.URL, err)
+	}
+
+	pb := NewProbe(&corev1.Probe{
+		PeriodSeconds:    1,
+		TimeoutSeconds:   5,
+		SuccessThreshold: 1,
+		FailureThreshold: 1,
+		Handler: corev1.Handler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Host:   tsURL.Hostname(),
+				Port:   intstr.FromString(tsURL.Port()),
+				Scheme: corev1.URISchemeHTTP,
+			},
+		},
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(5)
+	barrier := make(chan struct{})
+	for i := 0; i < 5; i++ {
+		go func() {
+			wg.Done()
+			<-barrier
+			pb.ProbeContainer()
+		}()
+	}
+	wg.Wait()
+	close(barrier)
+	if !pb.ProbeContainer() {
+		t.Error("Probe failed. Expected success.")
+	}
+	if got, want := atomic.LoadInt32(&cnt), int32(1); got != want {
+		t.Errorf("Probe count = %d, want: 1", got)
 	}
 }
 
@@ -401,7 +449,7 @@ func TestKnHTTPSuccessWithThresholdAndFailure(t *testing.T) {
 
 func TestKnHTTPTimeoutFailure(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(1 * time.Second)
+		time.Sleep(time.Second)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer ts.Close()
@@ -424,9 +472,12 @@ func TestKnHTTPTimeoutFailure(t *testing.T) {
 			},
 		},
 	})
+	pb.pollTimeout = time.Second
+	var logs bytes.Buffer
+	pb.out = &logs
 
 	if pb.ProbeContainer() {
-		t.Error("Probe succeeded. Expected failure due to timeout.")
+		t.Errorf("Probe succeeded. Expected failure due to timeout. Logs:\n%s", logs.String())
 	}
 }
 
@@ -482,9 +533,12 @@ func TestKnTCPProbeFailure(t *testing.T) {
 			},
 		},
 	})
+	pb.pollTimeout = time.Second
+	var logs bytes.Buffer
+	pb.out = &logs
 
 	if pb.ProbeContainer() {
-		t.Error("Got probe success. Wanted failure.")
+		t.Errorf("Got probe success. Wanted failure. Logs:\n%s", logs.String())
 	}
 }
 
@@ -513,8 +567,8 @@ func TestKnTCPProbeSuccessWithThreshold(t *testing.T) {
 		t.Error("Got probe error. Wanted success.")
 	}
 
-	if pb.Count() < 3 {
-		t.Errorf("Expected count to be 3, go %d", pb.Count())
+	if got := pb.count; got < 3 {
+		t.Errorf("Count = %d, want: 3", got)
 	}
 }
 
@@ -540,7 +594,7 @@ func TestKnTCPProbeSuccessThresholdIncludesFailure(t *testing.T) {
 	})
 
 	connCount := 0
-	desiredConnCount := 4 // 1 conn from 1st server, 3 from 2nd server
+	const desiredConnCount = 4 // 1 conn from 1st server, 3 from 2nd server
 
 	errChan := make(chan bool, 1)
 	go func() {
@@ -577,7 +631,7 @@ func TestKnTCPProbeSuccessThresholdIncludesFailure(t *testing.T) {
 	if probeErr := <-errChan; !probeErr {
 		t.Error("Wanted ProbeContainer() successed but got error")
 	}
-	if pb.Count() < successThreshold {
-		t.Errorf("Expected count to be %d but got %d", successThreshold, pb.Count())
+	if got := pb.count; got < successThreshold {
+		t.Errorf("Count = %d, want: %d", got, successThreshold)
 	}
 }

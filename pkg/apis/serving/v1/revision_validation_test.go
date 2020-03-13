@@ -29,6 +29,7 @@ import (
 	"knative.dev/serving/pkg/apis/autoscaling"
 	"knative.dev/serving/pkg/apis/config"
 	"knative.dev/serving/pkg/apis/serving"
+	autoscalerconfig "knative.dev/serving/pkg/autoscaler/config"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -273,7 +274,7 @@ func TestContainerConcurrencyValidation(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := serving.ValidateContainerConcurrency(&test.cc)
+			got := serving.ValidateContainerConcurrency(context.Background(), &test.cc)
 			if got, want := got.Error(), test.want.Error(); !cmp.Equal(got, want) {
 				t.Errorf("Validate (-want, +got) = %v", cmp.Diff(want, got))
 			}
@@ -348,7 +349,7 @@ func TestRevisionSpecValidation(t *testing.T) {
 			},
 		},
 		want: (&apis.FieldError{
-			Message: fmt.Sprintf(`duplicate volume name "the-name"`),
+			Message: `duplicate volume name "the-name"`,
 			Paths:   []string{"name"},
 		}).ViaFieldIndex("volumes", 1),
 	}, {
@@ -408,6 +409,7 @@ func TestRevisionSpecValidation(t *testing.T) {
 		},
 		wc: func(ctx context.Context) context.Context {
 			s := config.NewStore(logtesting.TestLogger(t))
+			s.OnConfigChanged(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: autoscalerconfig.ConfigName}})
 			s.OnConfigChanged(&corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: config.DefaultsConfigName,
@@ -515,6 +517,7 @@ func TestImmutableFields(t *testing.T) {
 		},
 		wc: func(ctx context.Context) context.Context {
 			s := config.NewStore(logtesting.TestLogger(t))
+			s.OnConfigChanged(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: autoscalerconfig.ConfigName}})
 			s.OnConfigChanged(&corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: config.DefaultsConfigName,

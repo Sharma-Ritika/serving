@@ -41,9 +41,8 @@ import (
 	"knative.dev/serving/pkg/apis/networking"
 	"knative.dev/serving/pkg/apis/serving"
 	v1 "knative.dev/serving/pkg/apis/serving/v1"
-	"knative.dev/serving/pkg/apis/serving/v1alpha1"
 	fakeservingclient "knative.dev/serving/pkg/client/injection/client/fake"
-	fakerevisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1alpha1/revision/fake"
+	fakerevisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/revision/fake"
 	"knative.dev/serving/pkg/queue"
 
 	. "knative.dev/pkg/logging/testing"
@@ -52,29 +51,30 @@ import (
 const (
 	testNamespace = "test-namespace"
 	testRevision  = "test-revision"
+
+	probeFreq     = 50 * time.Millisecond
+	updateTimeout = 6 * probeFreq
 )
 
 // revisionCC1 - creates a revision with concurrency == 1.
-func revisionCC1(revID types.NamespacedName, protocol networking.ProtocolType) *v1alpha1.Revision {
+func revisionCC1(revID types.NamespacedName, protocol networking.ProtocolType) *v1.Revision {
 	return revision(revID, protocol, 1)
 }
 
-func revision(revID types.NamespacedName, protocol networking.ProtocolType, cc int64) *v1alpha1.Revision {
-	return &v1alpha1.Revision{
+func revision(revID types.NamespacedName, protocol networking.ProtocolType, cc int64) *v1.Revision {
+	return &v1.Revision{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: revID.Namespace,
 			Name:      revID.Name,
 		},
-		Spec: v1alpha1.RevisionSpec{
-			RevisionSpec: v1.RevisionSpec{
-				ContainerConcurrency: ptr.Int64(cc),
-				PodSpec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Ports: []corev1.ContainerPort{{
-							Name: string(protocol),
-						}},
+		Spec: v1.RevisionSpec{
+			ContainerConcurrency: ptr.Int64(cc),
+			PodSpec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Ports: []corev1.ContainerPort{{
+						Name: string(protocol),
 					}},
-				},
+				}},
 			},
 		},
 	}
@@ -98,7 +98,7 @@ func privateSKSService(revID types.NamespacedName, clusterIP string, ports []cor
 }
 
 func waitForRevisionBackedMananger(t *testing.T, rbm *revisionBackendsManager) {
-	timeout := time.After(200 * time.Millisecond)
+	timeout := time.After(updateTimeout)
 	for {
 		select {
 		// rbm.updates() gets closed after all revisionWatchers have finished
@@ -117,7 +117,7 @@ func TestRevisionWatcher(t *testing.T) {
 	logger := TestLogger(t)
 	for _, tc := range []struct {
 		name                  string
-		dests                 []string
+		dests                 dests
 		protocol              networking.ProtocolType
 		clusterPort           corev1.ServicePort
 		clusterIP             string
@@ -127,7 +127,22 @@ func TestRevisionWatcher(t *testing.T) {
 		noPodAddressability   bool // This keeps the test defs shorter.
 	}{{
 		name:  "single healthy podIP",
-		dests: []string{"128.0.0.1:1234"},
+		dests: dests{ready: sets.NewString("128.0.0.1:1234")},
+		clusterPort: corev1.ServicePort{
+			Name: "http",
+			Port: 1234,
+		},
+		clusterIP:     "129.0.0.1",
+		expectUpdates: []revisionDestsUpdate{{Dests: sets.NewString("128.0.0.1:1234")}},
+		probeHostResponses: map[string][]activatortest.FakeResponse{
+			"128.0.0.1:1234": {{
+				Code: http.StatusOK,
+				Body: queue.Name,
+			}},
+		},
+	}, {
+		name:  "single not ready but healthy podIP",
+		dests: dests{notReady: sets.NewString("128.0.0.1:1234")},
 		clusterPort: corev1.ServicePort{
 			Name: "http",
 			Port: 1234,
@@ -142,7 +157,7 @@ func TestRevisionWatcher(t *testing.T) {
 		},
 	}, {
 		name:     "single http2 podIP",
-		dests:    []string{"128.0.0.1:1234"},
+		dests:    dests{ready: sets.NewString("128.0.0.1:1234")},
 		protocol: networking.ProtocolH2C,
 		clusterPort: corev1.ServicePort{
 			Name: "http2",
@@ -161,7 +176,7 @@ func TestRevisionWatcher(t *testing.T) {
 		},
 	}, {
 		name:     "single http2 clusterIP",
-		dests:    []string{"128.0.0.1:1234"},
+		dests:    dests{ready: sets.NewString("128.0.0.1:1234"), notReady: sets.NewString("128.0.0.2:1234")},
 		protocol: networking.ProtocolH2C,
 		clusterPort: corev1.ServicePort{
 			Name: "http2",
@@ -178,19 +193,22 @@ func TestRevisionWatcher(t *testing.T) {
 			"128.0.0.1:1234": {{
 				Err: errors.New("clusterIP transport error"),
 			}},
+			"128.0.0.2:1234": {{
+				Err: errors.New("clusterIP transport error"),
+			}},
 		},
 	}, {
 		name:      "no pods",
-		dests:     []string{},
+		dests:     dests{},
 		clusterIP: "129.0.0.1",
 	}, {
 		name:                  "no pods, was happy",
-		dests:                 []string{},
+		dests:                 dests{},
 		clusterIP:             "129.0.0.1",
 		initialClusterIPState: true,
 	}, {
 		name:  "single unavailable podIP",
-		dests: []string{"128.0.0.1:1234"},
+		dests: dests{ready: sets.NewString("128.0.0.1:1234")},
 		clusterPort: corev1.ServicePort{
 			Name: "http",
 			Port: 1234,
@@ -206,7 +224,7 @@ func TestRevisionWatcher(t *testing.T) {
 		},
 	}, {
 		name:  "single error podIP",
-		dests: []string{"128.0.0.1:1234"},
+		dests: dests{ready: sets.NewString("128.0.0.1:1234")},
 		clusterPort: corev1.ServicePort{
 			Name: "http",
 			Port: 1234,
@@ -222,7 +240,7 @@ func TestRevisionWatcher(t *testing.T) {
 		},
 	}, {
 		name:  "podIP slow ready",
-		dests: []string{"128.0.0.1:1234"},
+		dests: dests{ready: sets.NewString("128.0.0.1:1234")},
 		clusterPort: corev1.ServicePort{
 			Name: "http",
 			Port: 1234,
@@ -242,13 +260,13 @@ func TestRevisionWatcher(t *testing.T) {
 		},
 	}, {
 		name:  "multiple healthy podIP",
-		dests: []string{"128.0.0.1:1234", "128.0.0.2:1234"},
+		dests: dests{ready: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234"), notReady: sets.NewString("128.0.0.3:1234")},
 		clusterPort: corev1.ServicePort{
 			Name: "http",
 			Port: 1234,
 		},
 		clusterIP:     "129.0.0.1",
-		expectUpdates: []revisionDestsUpdate{{Dests: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234")}},
+		expectUpdates: []revisionDestsUpdate{{Dests: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234", "128.0.0.3:1234")}},
 		probeHostResponses: map[string][]activatortest.FakeResponse{
 			"128.0.0.1:1234": {{
 				Code: http.StatusOK,
@@ -258,10 +276,14 @@ func TestRevisionWatcher(t *testing.T) {
 				Code: http.StatusOK,
 				Body: queue.Name,
 			}},
+			"128.0.0.3:1234": {{
+				Code: http.StatusOK,
+				Body: queue.Name,
+			}},
 		},
 	}, {
 		name:  "one healthy one unhealthy podIP",
-		dests: []string{"128.0.0.1:1234", "128.0.0.2:1234"},
+		dests: dests{ready: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234")},
 		clusterPort: corev1.ServicePort{
 			Name: "http",
 			Port: 1234,
@@ -279,7 +301,7 @@ func TestRevisionWatcher(t *testing.T) {
 		},
 	}, {
 		name:  "one healthy one unhealthy podIP then both healthy",
-		dests: []string{"128.0.0.1:1234", "128.0.0.2:1234"},
+		dests: dests{ready: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234")},
 		clusterPort: corev1.ServicePort{
 			Name: "http",
 			Port: 4321,
@@ -306,7 +328,7 @@ func TestRevisionWatcher(t *testing.T) {
 		},
 	}, {
 		name:  "clusterIP slow ready, no pod addressability",
-		dests: []string{"128.0.0.1:1234"},
+		dests: dests{ready: sets.NewString("128.0.0.1:1234")},
 		clusterPort: corev1.ServicePort{
 			Name: "http",
 			Port: 1234,
@@ -332,7 +354,7 @@ func TestRevisionWatcher(t *testing.T) {
 		},
 	}, {
 		name:  "clusterIP  ready, no pod addressability",
-		dests: []string{"128.0.0.1:1234"},
+		dests: dests{ready: sets.NewString("128.0.0.1:1234")},
 		clusterPort: corev1.ServicePort{
 			Name: "http",
 			Port: 1235,
@@ -366,7 +388,7 @@ func TestRevisionWatcher(t *testing.T) {
 			defer close(updateCh)
 
 			// This gets closed up by revisionWatcher
-			destsCh := make(chan sets.String)
+			destsCh := make(chan dests)
 
 			// Default for protocol is http1
 			if tc.protocol == "" {
@@ -408,17 +430,17 @@ func TestRevisionWatcher(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				rw.run(100 * time.Millisecond)
+				rw.run(probeFreq)
 			}()
 
-			destsCh <- sets.NewString(tc.dests...)
+			destsCh <- tc.dests
 
 			updates := []revisionDestsUpdate{}
 			for i := 0; i < len(tc.expectUpdates); i++ {
 				select {
 				case update := <-updateCh:
 					updates = append(updates, update)
-				case <-time.After(200 * time.Millisecond):
+				case <-time.After(updateTimeout):
 					t.Error("Timed out waiting for update event")
 				}
 			}
@@ -447,7 +469,7 @@ func TestRevisionWatcher(t *testing.T) {
 func assertChClosed(t *testing.T, ch chan struct{}) {
 	defer func() {
 		if r := recover(); r == nil {
-			t.Errorf("the channel was not closed")
+			t.Error("the channel was not closed")
 		}
 	}()
 	select {
@@ -458,7 +480,7 @@ func assertChClosed(t *testing.T, ch chan struct{}) {
 	}
 }
 
-func epSubset(port int32, portName string, ips []string) *corev1.EndpointSubset {
+func epSubset(port int32, portName string, ips []string, notReadyIps []string) *corev1.EndpointSubset {
 	ss := &corev1.EndpointSubset{
 		Ports: []corev1.EndpointPort{{
 			Name: portName,
@@ -468,10 +490,17 @@ func epSubset(port int32, portName string, ips []string) *corev1.EndpointSubset 
 	for _, ip := range ips {
 		ss.Addresses = append(ss.Addresses, corev1.EndpointAddress{IP: ip})
 	}
+	for _, notReady := range notReadyIps {
+		ss.NotReadyAddresses = append(ss.NotReadyAddresses, corev1.EndpointAddress{IP: notReady})
+	}
 	return ss
 }
 
 func ep(revL string, port int32, portName string, ips ...string) *corev1.Endpoints {
+	return epNotReady(revL, port, portName, ips, nil)
+}
+
+func epNotReady(revL string, port int32, portName string, readyIps []string, notReadyIps []string) *corev1.Endpoints {
 	return &corev1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: revL + "-ep",
@@ -481,7 +510,7 @@ func ep(revL string, port int32, portName string, ips ...string) *corev1.Endpoin
 				serving.RevisionLabelKey:  revL,
 			},
 		},
-		Subsets: []corev1.EndpointSubset{*epSubset(port, portName, ips)},
+		Subsets: []corev1.EndpointSubset{*epSubset(port, portName, readyIps, notReadyIps)},
 	}
 }
 
@@ -490,7 +519,7 @@ func TestRevisionBackendManagerAddEndpoint(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
 		endpointsArr       []*corev1.Endpoints
-		revisions          []*v1alpha1.Revision
+		revisions          []*v1.Revision
 		services           []*corev1.Service
 		probeHostResponses map[string][]activatortest.FakeResponse
 		expectDests        map[types.NamespacedName]revisionDestsUpdate
@@ -498,11 +527,11 @@ func TestRevisionBackendManagerAddEndpoint(t *testing.T) {
 	}{{
 		name:         "add slow healthy",
 		endpointsArr: []*corev1.Endpoints{ep(testRevision, 1234, "http", "128.0.0.1")},
-		revisions: []*v1alpha1.Revision{
-			revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1),
+		revisions: []*v1.Revision{
+			revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1),
 		},
 		services: []*corev1.Service{
-			privateSKSService(types.NamespacedName{testNamespace, testRevision}, "129.0.0.1",
+			privateSKSService(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, "129.0.0.1",
 				[]corev1.ServicePort{{Name: "http", Port: 1234}}),
 		},
 		probeHostResponses: map[string][]activatortest.FakeResponse{
@@ -526,11 +555,11 @@ func TestRevisionBackendManagerAddEndpoint(t *testing.T) {
 	}, {
 		name:         "add slow ready http2",
 		endpointsArr: []*corev1.Endpoints{ep(testRevision, 1234, "http2", "128.0.0.1")},
-		revisions: []*v1alpha1.Revision{
-			revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolH2C),
+		revisions: []*v1.Revision{
+			revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolH2C),
 		},
 		services: []*corev1.Service{
-			privateSKSService(types.NamespacedName{testNamespace, testRevision}, "129.0.0.1",
+			privateSKSService(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, "129.0.0.1",
 				[]corev1.ServicePort{{Name: "http2", Port: 1234}}),
 		},
 		probeHostResponses: map[string][]activatortest.FakeResponse{
@@ -557,14 +586,14 @@ func TestRevisionBackendManagerAddEndpoint(t *testing.T) {
 			ep("test-revision1", 1234, "http", "128.0.0.1"),
 			ep("test-revision2", 1235, "http", "128.1.0.2"),
 		},
-		revisions: []*v1alpha1.Revision{
-			revisionCC1(types.NamespacedName{testNamespace, "test-revision1"}, networking.ProtocolHTTP1),
-			revisionCC1(types.NamespacedName{testNamespace, "test-revision2"}, networking.ProtocolHTTP1),
+		revisions: []*v1.Revision{
+			revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: "test-revision1"}, networking.ProtocolHTTP1),
+			revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: "test-revision2"}, networking.ProtocolHTTP1),
 		},
 		services: []*corev1.Service{
-			privateSKSService(types.NamespacedName{testNamespace, "test-revision1"}, "129.0.0.1",
+			privateSKSService(types.NamespacedName{Namespace: testNamespace, Name: "test-revision1"}, "129.0.0.1",
 				[]corev1.ServicePort{{Name: "http", Port: 2345}}),
-			privateSKSService(types.NamespacedName{testNamespace, "test-revision2"}, "129.0.0.2",
+			privateSKSService(types.NamespacedName{Namespace: testNamespace, Name: "test-revision2"}, "129.0.0.2",
 				[]corev1.ServicePort{{Name: "http", Port: 2345}}),
 		},
 		probeHostResponses: map[string][]activatortest.FakeResponse{
@@ -581,40 +610,13 @@ func TestRevisionBackendManagerAddEndpoint(t *testing.T) {
 		},
 		updateCnt: 2,
 	}, {
-		name:         "slow podIP",
-		endpointsArr: []*corev1.Endpoints{ep(testRevision, 1234, "http", "128.0.0.1")},
-		revisions: []*v1alpha1.Revision{
-			revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1),
-		},
-		services: []*corev1.Service{
-			privateSKSService(types.NamespacedName{testNamespace, testRevision}, "129.0.0.1",
-				[]corev1.ServicePort{{Name: "http", Port: 1234}}),
-		},
-		probeHostResponses: map[string][]activatortest.FakeResponse{
-			"129.0.0.1:1234": {{
-				Err: errors.New("clusterIP transport error"),
-			}},
-			"128.0.0.1:1234": {{
-				Code: http.StatusServiceUnavailable,
-			}, {
-				Code: http.StatusOK,
-				Body: queue.Name,
-			}},
-		},
-		expectDests: map[types.NamespacedName]revisionDestsUpdate{
-			{Namespace: testNamespace, Name: testRevision}: {
-				Dests: sets.NewString("128.0.0.1:1234"),
-			},
-		},
-		updateCnt: 1,
-	}, {
 		name:         "no pod addressability",
 		endpointsArr: []*corev1.Endpoints{ep(testRevision, 1234, "http", "128.0.0.1")},
-		revisions: []*v1alpha1.Revision{
-			revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1),
+		revisions: []*v1.Revision{
+			revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1),
 		},
 		services: []*corev1.Service{
-			privateSKSService(types.NamespacedName{testNamespace, testRevision}, "129.0.0.1",
+			privateSKSService(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, "129.0.0.1",
 				[]corev1.ServicePort{{Name: "http", Port: 1234}}),
 		},
 		probeHostResponses: map[string][]activatortest.FakeResponse{
@@ -636,11 +638,11 @@ func TestRevisionBackendManagerAddEndpoint(t *testing.T) {
 	}, {
 		name:         "unhealthy",
 		endpointsArr: []*corev1.Endpoints{ep(testRevision, 1234, "http", "128.0.0.1")},
-		revisions: []*v1alpha1.Revision{
-			revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1),
+		revisions: []*v1.Revision{
+			revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1),
 		},
 		services: []*corev1.Service{
-			privateSKSService(types.NamespacedName{testNamespace, testRevision}, "129.0.0.1",
+			privateSKSService(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, "129.0.0.1",
 				[]corev1.ServicePort{{Name: "http", Port: 1234}}),
 		},
 		probeHostResponses: map[string][]activatortest.FakeResponse{
@@ -653,6 +655,31 @@ func TestRevisionBackendManagerAddEndpoint(t *testing.T) {
 			}},
 		},
 		expectDests: map[types.NamespacedName]revisionDestsUpdate{},
+	}, {
+		name:         "unready pod successfully probed",
+		endpointsArr: []*corev1.Endpoints{epNotReady(testRevision, 1234, "http", nil, []string{"128.0.0.1"})},
+		revisions: []*v1.Revision{
+			revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1),
+		},
+		services: []*corev1.Service{
+			privateSKSService(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, "129.0.0.1",
+				[]corev1.ServicePort{{Name: "http", Port: 1234}}),
+		},
+		probeHostResponses: map[string][]activatortest.FakeResponse{
+			"129.0.0.1:1234": {{
+				Err: errors.New("clusterIP transport error"),
+			}},
+			"128.0.0.1:1234": {{
+				Code: http.StatusOK,
+				Body: queue.Name,
+			}},
+		},
+		expectDests: map[types.NamespacedName]revisionDestsUpdate{
+			{Namespace: testNamespace, Name: testRevision}: {
+				Dests: sets.NewString("128.0.0.1:1234"),
+			},
+		},
+		updateCnt: 1,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeRT := activatortest.FakeRoundTripper{
@@ -669,7 +696,7 @@ func TestRevisionBackendManagerAddEndpoint(t *testing.T) {
 
 			// Add the revision we're testing.
 			for _, rev := range tc.revisions {
-				fakeservingclient.Get(ctx).ServingV1alpha1().Revisions(testNamespace).Create(rev)
+				fakeservingclient.Get(ctx).ServingV1().Revisions(testNamespace).Create(rev)
 				revisions.Informer().GetIndexer().Add(rev)
 			}
 
@@ -687,7 +714,7 @@ func TestRevisionBackendManagerAddEndpoint(t *testing.T) {
 				waitInformers()
 			}()
 
-			rbm := newRevisionBackendsManagerWithProbeFrequency(ctx, rt, 50*time.Millisecond)
+			rbm := newRevisionBackendsManagerWithProbeFrequency(ctx, rt, probeFreq)
 
 			for _, ep := range tc.endpointsArr {
 				fakekubeclient.Get(ctx).CoreV1().Endpoints(testNamespace).Create(ep)
@@ -700,8 +727,8 @@ func TestRevisionBackendManagerAddEndpoint(t *testing.T) {
 				select {
 				case update := <-rbm.updates():
 					revDests[update.Rev] = update
-				case <-time.After(300 * time.Millisecond):
-					t.Errorf("Timed out waiting for update event")
+				case <-time.After(updateTimeout):
+					t.Error("Timed out waiting for update event")
 				}
 			}
 
@@ -728,7 +755,7 @@ func TestCheckDests(t *testing.T) {
 	ctx, cancel, _ := rtesting.SetupFakeContextWithCancel(t)
 
 	svc := privateSKSService(
-		types.NamespacedName{testNamespace, testRevision},
+		types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 		"129.0.0.1",
 		[]corev1.ServicePort{{Name: "http", Port: 1234}},
 	)
@@ -751,13 +778,13 @@ func TestCheckDests(t *testing.T) {
 	rw := &revisionWatcher{
 		clusterIPHealthy: true,
 		podsAddressable:  false,
-		rev:              types.NamespacedName{testNamespace, testRevision},
+		rev:              types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 		updateCh:         uCh,
 		serviceLister:    si.Lister(),
 		logger:           TestLogger(t),
 		stopCh:           dCh,
 	}
-	rw.checkDests(sets.NewString("10.1.1.5"))
+	rw.checkDests(dests{ready: sets.NewString("10.1.1.5"), notReady: sets.NewString("10.1.1.6")})
 	select {
 	case <-uCh:
 		// Success.
@@ -766,7 +793,7 @@ func TestCheckDests(t *testing.T) {
 	}
 
 	close(dCh)
-	rw.checkDests(sets.NewString("10.1.1.5"))
+	rw.checkDests(dests{ready: sets.NewString("10.1.1.5"), notReady: sets.NewString("10.1.1.6")})
 	select {
 	case <-uCh:
 		t.Error("Expected no update but got one")
@@ -781,7 +808,7 @@ func TestCheckDestsSwinging(t *testing.T) {
 	ctx, cancel, _ := rtesting.SetupFakeContextWithCancel(t)
 
 	svc := privateSKSService(
-		types.NamespacedName{testNamespace, testRevision},
+		types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 		"10.5.0.1",
 		[]corev1.ServicePort{{Name: "http", Port: 1234}},
 	)
@@ -830,6 +857,12 @@ func TestCheckDestsSwinging(t *testing.T) {
 				Code: http.StatusOK,
 				Body: queue.Name,
 			}},
+			"10.0.0.4:1234": {{
+				Err: errors.New("podIP transport error"),
+			}, {
+				Code: http.StatusOK,
+				Body: queue.Name,
+			}},
 		},
 	}
 
@@ -837,7 +870,7 @@ func TestCheckDestsSwinging(t *testing.T) {
 	uCh := make(chan revisionDestsUpdate, 1)
 	dCh := make(chan struct{})
 	rw := &revisionWatcher{
-		rev:             types.NamespacedName{testNamespace, testRevision},
+		rev:             types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 		updateCh:        uCh,
 		serviceLister:   si.Lister(),
 		logger:          TestLogger(t),
@@ -846,9 +879,9 @@ func TestCheckDestsSwinging(t *testing.T) {
 		transport:       network.RoundTripperFunc(fakeRT.RT),
 	}
 	// First not ready, second good, clusterIP: not ready.
-	rw.checkDests(sets.NewString("10.0.0.1:1234", "10.0.0.2:1234"))
+	rw.checkDests(dests{ready: sets.NewString("10.0.0.1:1234", "10.0.0.2:1234")})
 	want := revisionDestsUpdate{
-		Rev:           types.NamespacedName{testNamespace, testRevision},
+		Rev:           types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 		ClusterIPDest: "",
 		Dests:         sets.NewString("10.0.0.2:1234"),
 	}
@@ -863,7 +896,7 @@ func TestCheckDestsSwinging(t *testing.T) {
 	}
 
 	// Second gone, first becomes ready, clusterIP still not ready.
-	rw.checkDests(sets.NewString("10.0.0.1:1234"))
+	rw.checkDests(dests{ready: sets.NewString("10.0.0.1:1234")})
 	select {
 	case got := <-uCh:
 		want.Dests = sets.NewString("10.0.0.1:1234")
@@ -875,7 +908,7 @@ func TestCheckDestsSwinging(t *testing.T) {
 	}
 
 	// Second is back, but not healthy yet.
-	rw.checkDests(sets.NewString("10.0.0.1:1234", "10.0.0.2:1234"))
+	rw.checkDests(dests{ready: sets.NewString("10.0.0.1:1234", "10.0.0.2:1234")})
 	select {
 	case got := <-uCh:
 		// No update should be sent out, since there's only healthy pod, same as above.
@@ -884,7 +917,7 @@ func TestCheckDestsSwinging(t *testing.T) {
 	}
 
 	// All pods are happy now.
-	rw.checkDests(sets.NewString("10.0.0.1:1234", "10.0.0.2:1234"))
+	rw.checkDests(dests{ready: sets.NewString("10.0.0.1:1234", "10.0.0.2:1234")})
 	select {
 	case got := <-uCh:
 		want.Dests = sets.NewString("10.0.0.2:1234", "10.0.0.1:1234")
@@ -896,7 +929,7 @@ func TestCheckDestsSwinging(t *testing.T) {
 	}
 
 	// Make sure we do not send out redundant updates.
-	rw.checkDests(sets.NewString("10.0.0.1:1234", "10.0.0.2:1234"))
+	rw.checkDests(dests{ready: sets.NewString("10.0.0.1:1234", "10.0.0.2:1234")})
 	select {
 	case got := <-uCh:
 		t.Errorf("Expected no update, but got %#v", got)
@@ -904,8 +937,29 @@ func TestCheckDestsSwinging(t *testing.T) {
 		// Success.
 	}
 
+	// Add a notReady pod, but it's not ready. No update should be sent.
+	rw.checkDests(dests{ready: sets.NewString("10.0.0.1:1234", "10.0.0.2:1234"), notReady: sets.NewString("10.0.0.4:1234")})
+	select {
+	case got := <-uCh:
+		t.Errorf("Expected no update, but got %#v", got)
+	default:
+		// Success.
+	}
+
+	// The notReady pod is now ready!
+	rw.checkDests(dests{ready: sets.NewString("10.0.0.1:1234", "10.0.0.2:1234"), notReady: sets.NewString("10.0.0.4:1234")})
+	select {
+	case got := <-uCh:
+		want.Dests = sets.NewString("10.0.0.1:1234", "10.0.0.2:1234", "10.0.0.4:1234")
+		if !cmp.Equal(got, want) {
+			t.Errorf("Update = %#v, want: %#v, diff: %s", got, want, cmp.Diff(want, got))
+		}
+	default:
+		t.Error("Expected update but it never went out.")
+	}
+
 	// Swing to a different pods.
-	rw.checkDests(sets.NewString("10.0.0.3:1234", "10.0.0.2:1234"))
+	rw.checkDests(dests{ready: sets.NewString("10.0.0.3:1234", "10.0.0.2:1234")})
 	select {
 	case got := <-uCh:
 		want.Dests = sets.NewString("10.0.0.2:1234", "10.0.0.3:1234")
@@ -917,7 +971,7 @@ func TestCheckDestsSwinging(t *testing.T) {
 	}
 
 	// Scale down by 1.
-	rw.checkDests(sets.NewString("10.0.0.2:1234"))
+	rw.checkDests(dests{ready: sets.NewString("10.0.0.2:1234")})
 	select {
 	case got := <-uCh:
 		want.Dests = sets.NewString("10.0.0.2:1234")
@@ -933,7 +987,7 @@ func TestRevisionDeleted(t *testing.T) {
 	ctx, cancel, _ := rtesting.SetupFakeContextWithCancel(t)
 
 	svc := privateSKSService(
-		types.NamespacedName{testNamespace, testRevision},
+		types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 		"129.0.0.1",
 		[]corev1.ServicePort{{Name: "http", Port: 1234}},
 	)
@@ -953,8 +1007,8 @@ func TestRevisionDeleted(t *testing.T) {
 		waitInformers()
 	}()
 
-	rev := revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1)
-	fakeservingclient.Get(ctx).ServingV1alpha1().Revisions(testNamespace).Create(rev)
+	rev := revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1)
+	fakeservingclient.Get(ctx).ServingV1().Revisions(testNamespace).Create(rev)
 	ri := fakerevisioninformer.Get(ctx)
 	ri.Informer().GetIndexer().Add(rev)
 
@@ -967,14 +1021,14 @@ func TestRevisionDeleted(t *testing.T) {
 	select {
 	case <-rbm.updates():
 	case <-time.After(time.Second * 2):
-		t.Errorf("Timedout waiting for initial response")
+		t.Error("Timedout waiting for initial response")
 	}
 	// Now delete the endpoints.
 	fakekubeclient.Get(ctx).CoreV1().Endpoints(testNamespace).Delete(ep.Name, &metav1.DeleteOptions{})
 	select {
 	case r := <-rbm.updates():
 		t.Errorf("Unexpected update: %#v", r)
-	case <-time.After(time.Millisecond * 200):
+	case <-time.After(updateTimeout):
 		// Wait to make sure the callbacks are executed.
 	}
 
@@ -998,8 +1052,8 @@ func TestServiceDoesNotExist(t *testing.T) {
 		waitInformers()
 	}()
 
-	rev := revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1)
-	fakeservingclient.Get(ctx).ServingV1alpha1().Revisions(testNamespace).Create(rev)
+	rev := revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1)
+	fakeservingclient.Get(ctx).ServingV1().Revisions(testNamespace).Create(rev)
 	ri := fakerevisioninformer.Get(ctx)
 	ri.Informer().GetIndexer().Add(rev)
 
@@ -1029,7 +1083,7 @@ func TestServiceDoesNotExist(t *testing.T) {
 		// cluster IP. But if the service is accessible then we will and probing will
 		// succeed since RT has no rules for that.
 		t.Errorf("Unexpected update, should have had none: %v", x)
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(updateTimeout):
 	}
 
 	cancel()
@@ -1052,15 +1106,15 @@ func TestServiceMoreThanOne(t *testing.T) {
 		waitInformers()
 	}()
 
-	rev := revisionCC1(types.NamespacedName{testNamespace, testRevision}, networking.ProtocolHTTP1)
-	fakeservingclient.Get(ctx).ServingV1alpha1().Revisions(testNamespace).Create(rev)
+	rev := revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, networking.ProtocolHTTP1)
+	fakeservingclient.Get(ctx).ServingV1().Revisions(testNamespace).Create(rev)
 	ri := fakerevisioninformer.Get(ctx)
 	ri.Informer().GetIndexer().Add(rev)
 
 	// Now let's create two!
 	for _, num := range []string{"11", "12"} {
 		svc := privateSKSService(
-			types.NamespacedName{testNamespace, testRevision},
+			types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			"129.0.0."+num,
 			[]corev1.ServicePort{{Name: "http", Port: 1234}},
 		)
@@ -1096,7 +1150,7 @@ func TestServiceMoreThanOne(t *testing.T) {
 		// cluster IP. But if the service is accessible then we will and probing will
 		// succeed since RT has no rules for that.
 		t.Errorf("Unexpected update, should have had none: %v", x)
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(updateTimeout):
 	}
 
 	cancel()

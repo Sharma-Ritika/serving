@@ -28,6 +28,7 @@ import (
 	pkgmetrics "knative.dev/pkg/metrics"
 	pkgtracing "knative.dev/pkg/tracing/config"
 	apisconfig "knative.dev/serving/pkg/apis/config"
+	autoscalerconfig "knative.dev/serving/pkg/autoscaler/config"
 	deployment "knative.dev/serving/pkg/deployment"
 	"knative.dev/serving/pkg/network"
 
@@ -43,6 +44,7 @@ func TestStoreLoadWithContext(t *testing.T) {
 	loggingConfig := ConfigMapFromTestFile(t, logging.ConfigMapName())
 	tracingConfig := ConfigMapFromTestFile(t, pkgtracing.ConfigName)
 	defaultConfig := ConfigMapFromTestFile(t, apisconfig.DefaultsConfigName)
+	autoscalerConfig := ConfigMapFromTestFile(t, autoscalerconfig.ConfigName)
 
 	store.OnConfigChanged(deploymentConfig)
 	store.OnConfigChanged(networkConfig)
@@ -50,6 +52,7 @@ func TestStoreLoadWithContext(t *testing.T) {
 	store.OnConfigChanged(loggingConfig)
 	store.OnConfigChanged(tracingConfig)
 	store.OnConfigChanged(defaultConfig)
+	store.OnConfigChanged(autoscalerConfig)
 
 	config := FromContext(store.ToContext(context.Background()))
 
@@ -96,6 +99,13 @@ func TestStoreLoadWithContext(t *testing.T) {
 			t.Errorf("Unexpected defaults config (-want, +got): %v", diff)
 		}
 	})
+
+	t.Run("autoscaler", func(t *testing.T) {
+		expected, _ := autoscalerconfig.NewConfigFromConfigMap(autoscalerConfig)
+		if diff := cmp.Diff(expected, config.Autoscaler); diff != "" {
+			t.Errorf("Unexpected autoscaler config (-want, +got): %v", diff)
+		}
+	})
 }
 
 func TestStoreImmutableConfig(t *testing.T) {
@@ -107,27 +117,29 @@ func TestStoreImmutableConfig(t *testing.T) {
 	store.OnConfigChanged(ConfigMapFromTestFile(t, logging.ConfigMapName()))
 	store.OnConfigChanged(ConfigMapFromTestFile(t, pkgtracing.ConfigName))
 	store.OnConfigChanged(ConfigMapFromTestFile(t, apisconfig.DefaultsConfigName))
+	store.OnConfigChanged(ConfigMapFromTestFile(t, autoscalerconfig.ConfigName))
 
 	config := store.Load()
 
 	config.Deployment.QueueSidecarImage = "mutated"
-	config.Network.IstioOutboundIPRanges = "mutated"
 	config.Logging.LoggingConfig = "mutated"
 	ccMutated := int64(4)
 	config.Defaults.ContainerConcurrency = ccMutated
+	scaleupMutated := float64(4)
+	config.Autoscaler.MaxScaleUpRate = scaleupMutated
 
 	newConfig := store.Load()
 
 	if newConfig.Deployment.QueueSidecarImage == "mutated" {
 		t.Error("Controller config is not immutable")
 	}
-	if newConfig.Network.IstioOutboundIPRanges == "mutated" {
-		t.Error("Network config is not immutable")
-	}
 	if newConfig.Logging.LoggingConfig == "mutated" {
 		t.Error("Logging config is not immutable")
 	}
 	if newConfig.Defaults.ContainerConcurrency == ccMutated {
 		t.Error("Defaults config is not immutable")
+	}
+	if newConfig.Autoscaler.MaxScaleUpRate == scaleupMutated {
+		t.Error("Autoscaler config is not immutable")
 	}
 }

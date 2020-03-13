@@ -26,8 +26,8 @@ import (
 	"knative.dev/pkg/ptr"
 	"knative.dev/serving/pkg/apis/autoscaling"
 	"knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
-	servingv1alpha1 "knative.dev/serving/pkg/apis/serving/v1alpha1"
-	"knative.dev/serving/pkg/autoscaler"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	autoscalerconfig "knative.dev/serving/pkg/autoscaler/config"
 
 	autoscalingv2beta1 "k8s.io/api/autoscaling/v2beta1"
 	corev1 "k8s.io/api/core/v1"
@@ -94,7 +94,7 @@ func TestMakeHPA(t *testing.T) {
 				Type: autoscalingv2beta1.ObjectMetricSourceType,
 				Object: &autoscalingv2beta1.ObjectMetricSource{
 					Target: autoscalingv2beta1.CrossVersionObjectReference{
-						APIVersion: servingv1alpha1.SchemeGroupVersion.String(),
+						APIVersion: servingv1.SchemeGroupVersion.String(),
 						Kind:       "revision",
 						Name:       testName,
 					},
@@ -113,7 +113,7 @@ func TestMakeHPA(t *testing.T) {
 				Type: autoscalingv2beta1.ObjectMetricSourceType,
 				Object: &autoscalingv2beta1.ObjectMetricSource{
 					Target: autoscalingv2beta1.CrossVersionObjectReference{
-						APIVersion: servingv1alpha1.SchemeGroupVersion.String(),
+						APIVersion: servingv1.SchemeGroupVersion.String(),
 						Kind:       "revision",
 						Name:       testName,
 					},
@@ -131,7 +131,7 @@ func TestMakeHPA(t *testing.T) {
 				Type: autoscalingv2beta1.ObjectMetricSourceType,
 				Object: &autoscalingv2beta1.ObjectMetricSource{
 					Target: autoscalingv2beta1.CrossVersionObjectReference{
-						APIVersion: servingv1alpha1.SchemeGroupVersion.String(),
+						APIVersion: servingv1.SchemeGroupVersion.String(),
 						Kind:       "revision",
 						Name:       testName,
 					},
@@ -150,7 +150,7 @@ func TestMakeHPA(t *testing.T) {
 				Type: autoscalingv2beta1.ObjectMetricSourceType,
 				Object: &autoscalingv2beta1.ObjectMetricSource{
 					Target: autoscalingv2beta1.CrossVersionObjectReference{
-						APIVersion: servingv1alpha1.SchemeGroupVersion.String(),
+						APIVersion: servingv1.SchemeGroupVersion.String(),
 						Kind:       "revision",
 						Name:       testName,
 					},
@@ -263,7 +263,7 @@ func withMetric(m autoscalingv2beta1.MetricSpec) hpaOption {
 	}
 }
 
-var config = &autoscaler.Config{
+var config = &autoscalerconfig.Config{
 	EnableScaleToZero:                  true,
 	ContainerConcurrencyTargetFraction: 1.0,
 	ContainerConcurrencyTargetDefault:  100.0,

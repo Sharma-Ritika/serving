@@ -22,10 +22,14 @@ metadata:
   namespace: kourier-system
 spec:
   ports:
-    - name: http
+    - name: http2
       port: 80
       protocol: TCP
       targetPort: 8080
+    - name: https
+      port: 443
+      protocol: TCP
+      targetPort: 8443
   selector:
     app: 3scale-kourier-gateway
   type: LoadBalancer
@@ -36,17 +40,9 @@ metadata:
   name: 3scale-kourier-gateway
   namespace: kourier-system
 spec:
-  progressDeadlineSeconds: 600
-  replicas: 1
-  revisionHistoryLimit: 10
   selector:
     matchLabels:
       app: 3scale-kourier-gateway
-  strategy:
-    rollingUpdate:
-      maxSurge: 25%
-      maxUnavailable: 25%
-    type: RollingUpdate
   template:
     metadata:
       labels:
@@ -56,32 +52,36 @@ spec:
         - args:
             - -c
             - /tmp/config/envoy-bootstrap.yaml
-          image: quay.io/3scale/kourier-gateway:v0.1.3
+          command:
+            - /usr/local/bin/envoy
+          image: docker.io/maistra/proxyv2-ubi8:1.0.8
           imagePullPolicy: Always
           name: kourier-gateway
           ports:
-            - containerPort: 8080
+            - name: http2
+              containerPort: 8080
               protocol: TCP
-          resources: {}
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
+            - name: https
+              containerPort: 8443
+              protocol: TCP
           volumeMounts:
             - name: config-volume
               mountPath: /tmp/config
           readinessProbe:
-            exec:
-              command: ['ash','-c','(printf "GET /__internalkouriersnapshot HTTP/1.1\r\nHost: internalkourier\r\n\r\n"; sleep 1) | nc -n localhost 8081 | grep "HTTP/1.1 200 OK"']
+            httpGet:
+              httpHeaders:
+                - name: Host
+                  value: internalkourier
+              path: /__internalkouriersnapshot
+              port: 8081
+              scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 2
       volumes:
         - name: config-volume
           configMap:
             name: kourier-bootstrap
-      dnsPolicy: ClusterFirst
       restartPolicy: Always
-      schedulerName: default-scheduler
-      securityContext: {}
-      terminationGracePeriodSeconds: 30
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -89,29 +89,19 @@ metadata:
   name: 3scale-kourier-control
   namespace: kourier-system
 spec:
-  progressDeadlineSeconds: 600
   replicas: 1
-  revisionHistoryLimit: 10
   selector:
     matchLabels:
       app: 3scale-kourier-control
-  strategy:
-    rollingUpdate:
-      maxSurge: 25%
-      maxUnavailable: 25%
-    type: RollingUpdate
   template:
     metadata:
       labels:
         app: 3scale-kourier-control
     spec:
       containers:
-        - image: quay.io/3scale/kourier:v0.3.4
+        - image: quay.io/3scale/kourier:v0.3.12
           imagePullPolicy: Always
           name: kourier-control
-          resources: {}
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
           env:
             - name: CERTS_SECRET_NAMESPACE
               value: ""
@@ -121,12 +111,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-      dnsPolicy: ClusterFirst
       restartPolicy: Always
-      schedulerName: default-scheduler
-      securityContext: {}
       serviceAccountName: 3scale-kourier
-      terminationGracePeriodSeconds: 30
 ---
 apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: ClusterRole
@@ -179,22 +165,7 @@ spec:
       targetPort: 8081
   selector:
     app: 3scale-kourier-gateway
-  type: LoadBalancer
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: kourier-external
-  namespace: kourier-system
-spec:
-  ports:
-    - name: http2
-      port: 80
-      protocol: TCP
-      targetPort: 8080
-  selector:
-    app: 3scale-kourier-gateway
-  type: LoadBalancer
+  type: ClusterIP
 ---
 apiVersion: v1
 kind: Service
@@ -208,7 +179,7 @@ spec:
       targetPort: 18000
   selector:
     app: 3scale-kourier-control
-  type: LoadBalancer
+  type: ClusterIP
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -217,12 +188,6 @@ metadata:
   namespace: kourier-system
 data:
   envoy-bootstrap.yaml: |
-    admin:
-      access_log_path: /tmp/test
-      address:
-        socket_address:
-          address: 0.0.0.0
-          port_value: 19000
     dynamic_resources:
       ads_config:
         api_type: GRPC
@@ -237,20 +202,55 @@ data:
       cluster: kourier-knative
       id: 3scale-kourier-gateway
     static_resources:
+      listeners:
+        - name: stats_listener
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 9000
+          filter_chains:
+            - filters:
+                - name: envoy.http_connection_manager
+                  config:
+                    stat_prefix: stats_server
+                    route_config:
+                      virtual_hosts:
+                        - name: admin_interface
+                          domains:
+                            - "*"
+                          routes:
+                            - match:
+                                regex: '/(certs|stats(/prometheus)?|server_info|clusters|listeners|ready)?'
+                                headers:
+                                  - name: ':method'
+                                    exact_match: GET
+                              route:
+                                cluster: service_stats
+                    http_filters:
+                      - name: envoy.router
+                        config: {}
       clusters:
-        - connect_timeout: 0.2s
+        - name: service_stats
+          connect_timeout: 0.250s
+          type: static
           load_assignment:
-            cluster_name: xds_cluster
+            cluster_name: service_stats
             endpoints:
-              - lb_endpoints:
-                - endpoint:
-                    address:
-                      socket_address:
-                        address: kourier-control
-                        port_value: 18000
+              lb_endpoints:
+                endpoint:
+                  address:
+                    pipe:
+                      path: /tmp/envoy.admin
+        - name: xds_cluster
+          connect_timeout: 1s
+          hosts:
+            - socket_address:
+                address: "kourier-control"
+                port_value: 18000
           http2_protocol_options: {}
-          upstream_connection_options:
-            tcp_keepalive: {}
-          lb_policy: ROUND_ROBIN
-          name: xds_cluster
           type: STRICT_DNS
+    admin:
+      access_log_path: "/dev/stdout"
+      address:
+        pipe:
+          path: /tmp/envoy.admin

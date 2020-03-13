@@ -36,7 +36,7 @@ import (
 	// Injection related imports.
 	kubeclient "knative.dev/pkg/client/injection/kube/client"
 	"knative.dev/pkg/injection"
-	revisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1alpha1/revision"
+	revisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/revision"
 
 	"k8s.io/apimachinery/pkg/util/wait"
 
@@ -54,16 +54,14 @@ import (
 	tracingconfig "knative.dev/pkg/tracing/config"
 	"knative.dev/pkg/version"
 	"knative.dev/pkg/websocket"
-	"knative.dev/serving/pkg/activator"
 	activatorconfig "knative.dev/serving/pkg/activator/config"
 	activatorhandler "knative.dev/serving/pkg/activator/handler"
 	activatornet "knative.dev/serving/pkg/activator/net"
 	"knative.dev/serving/pkg/apis/networking"
-	"knative.dev/serving/pkg/autoscaler"
+	asmetrics "knative.dev/serving/pkg/autoscaler/metrics"
 	pkghttp "knative.dev/serving/pkg/http"
 	"knative.dev/serving/pkg/logging"
 	"knative.dev/serving/pkg/network"
-	"knative.dev/serving/pkg/queue"
 )
 
 const (
@@ -71,14 +69,6 @@ const (
 
 	// Add enough buffer to not block request serving on stats collection
 	requestCountingQueueLength = 100
-
-	// The number of requests that are queued on the breaker before the 503s are sent.
-	// The value must be adjusted depending on the actual production requirements.
-	breakerQueueDepth = 10000
-
-	// The upper bound for concurrent requests sent to the revision.
-	// As new endpoints show up, the Breakers concurrency increases up to this value.
-	breakerMaxConcurrency = 1000
 
 	// The port on which autoscaler WebSocket server listens.
 	autoscalerPort = ":8080"
@@ -91,7 +81,7 @@ var (
 )
 
 func statReporter(statSink *websocket.ManagedConnection, stopCh <-chan struct{},
-	statChan <-chan []autoscaler.StatMessage, logger *zap.SugaredLogger) {
+	statChan <-chan []asmetrics.StatMessage, logger *zap.SugaredLogger) {
 	for {
 		select {
 		case sm := <-statChan:
@@ -176,21 +166,14 @@ func main() {
 
 	logger.Info("Starting the knative activator")
 
-	reporter, err := activator.NewStatsReporter(env.PodName)
-	if err != nil {
-		logger.Fatalw("Failed to create stats reporter", zap.Error(err))
-	}
-
-	statCh := make(chan []autoscaler.StatMessage)
+	statCh := make(chan []asmetrics.StatMessage)
 	defer close(statCh)
 
 	reqCh := make(chan activatorhandler.ReqEvent, requestCountingQueueLength)
 	defer close(reqCh)
 
-	params := queue.BreakerParams{QueueDepth: breakerQueueDepth, MaxConcurrency: breakerMaxConcurrency, InitialCapacity: 0}
-
 	// Start throttler.
-	throttler := activatornet.NewThrottler(ctx, params,
+	throttler := activatornet.NewThrottler(ctx,
 		// We want to join host port since that will be our search space in the Throttler.
 		net.JoinHostPort(env.PodIP, strconv.Itoa(networking.BackendHTTPPort)))
 	go throttler.Run(ctx)
@@ -217,18 +200,12 @@ func main() {
 	go statReporter(statSink, ctx.Done(), statCh, logger)
 
 	// Create and run our concurrency reporter
-	reportTicker := time.NewTicker(time.Second)
-	defer reportTicker.Stop()
-	cr := activatorhandler.NewConcurrencyReporter(ctx, env.PodName, reqCh,
-		reportTicker.C, statCh, reporter)
+	cr := activatorhandler.NewConcurrencyReporter(ctx, env.PodName, reqCh, statCh)
 	go cr.Run(ctx.Done())
 
 	// Create activation handler chain
 	// Note: innermost handlers are specified first, ie. the last handler in the chain will be executed first
-	var ah http.Handler = activatorhandler.New(
-		ctx,
-		throttler,
-		reporter)
+	var ah http.Handler = activatorhandler.New(ctx, throttler)
 	ah = activatorhandler.NewRequestEventHandler(reqCh, ah)
 	ah = tracing.HTTPSpanMiddleware(ah)
 	ah = configStore.HTTPMiddleware(ah)
@@ -241,7 +218,7 @@ func main() {
 
 	// NOTE: MetricHandler is being used as the outermost handler of the meaty bits. We're not interested in measuring
 	// the healthchecks or probes.
-	ah = activatorhandler.NewMetricHandler(ctx, reporter, ah)
+	ah = activatorhandler.NewMetricHandler(env.PodName, ah)
 	ah = activatorhandler.NewContextHandler(ctx, ah)
 
 	// Network probe handlers.

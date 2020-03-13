@@ -61,16 +61,16 @@ func TestDestroyPodInflight(t *testing.T) {
 		Route:  svcName,
 		Image:  "timeout",
 	}
+	test.CleanupOnInterrupt(func() { test.TearDown(clients, names) })
+	defer test.TearDown(clients, names)
 
+	t.Log("Creating a new Route and Configuration")
 	if _, err := v1a1test.CreateConfiguration(t, clients, names, v1a1opts.WithConfigRevisionTimeoutSeconds(revisionTimeoutSeconds)); err != nil {
 		t.Fatalf("Failed to create Configuration: %v", err)
 	}
 	if _, err := v1a1test.CreateRoute(t, clients, names); err != nil {
 		t.Fatalf("Failed to create Route: %v", err)
 	}
-
-	test.CleanupOnInterrupt(func() { test.TearDown(clients, names) })
-	defer test.TearDown(clients, names)
 
 	t.Log("When the Revision can have traffic routed to it, the Route is marked as Ready")
 	if err := v1a1test.WaitForRouteState(clients.ServingAlphaClient, names.Route, v1a1test.IsRouteReady, "RouteIsReady"); err != nil {
@@ -173,7 +173,7 @@ func TestDestroyPodTimely(t *testing.T) {
 	test.CleanupOnInterrupt(func() { test.TearDown(clients, names) })
 
 	objects, _, err := v1a1test.CreateRunLatestServiceReady(t, clients, &names,
-		false, /* https TODO(taragu) turn this on after helloworld test running with https */
+		test.ServingFlags.Https,
 		v1a1opts.WithRevisionTimeoutSeconds(int64(revisionTimeout.Seconds())))
 	if err != nil {
 		t.Fatalf("Failed to create a service: %v", err)
@@ -244,7 +244,7 @@ func TestDestroyPodWithRequests(t *testing.T) {
 	test.CleanupOnInterrupt(func() { test.TearDown(clients, names) })
 
 	objects, _, err := v1a1test.CreateRunLatestServiceReady(t, clients, &names,
-		false, /* https TODO(taragu) turn this on after helloworld test running with https */
+		test.ServingFlags.Https,
 		v1a1opts.WithRevisionTimeoutSeconds(int64(revisionTimeout.Seconds())))
 	if err != nil {
 		t.Fatalf("Failed to create a service: %v", err)
